@@ -86,8 +86,12 @@ pub struct Annotations {
     pub ipc_channel_error: Option<String>,
     #[serde(rename = "OOMAllocationSize")]
     pub oom_size: Option<u64>,
-    // TODO no annotation for this
+    #[serde(rename = "OS")]
     pub os: Option<String>,
     #[serde(rename = "ReleaseChannel")]
     pub channel: Option<String>,
+    #[serde(rename = "AsyncShutdownTimeout")]
+    pub async_shutdown_timeout: Option<String>,
+    #[serde(rename = "Hang")]
+    pub hang: Option<String>,
 }
