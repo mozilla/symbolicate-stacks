@@ -77,21 +77,21 @@ impl SymbolicateStacks {
 
 #[derive(Debug, serde::Deserialize)]
 pub struct Annotations {
-    #[serde(rename = "StackTraces")]
+    #[serde(alias = "StackTraces")]
     pub stack_traces: Option<String>,
-    #[serde(rename = "JavaException")]
+    #[serde(alias = "JavaException")]
     pub java_exception: Option<String>,
-    #[serde(rename = "MozCrashReason")]
+    #[serde(alias = "MozCrashReason")]
     pub moz_crash_reason: Option<String>,
     pub ipc_channel_error: Option<String>,
-    #[serde(rename = "OOMAllocationSize")]
+    #[serde(alias = "OOMAllocationSize")]
     pub oom_size: Option<u64>,
-    #[serde(rename = "OS")]
+    #[serde(alias = "OS")]
     pub os: Option<String>,
-    #[serde(rename = "ReleaseChannel")]
+    #[serde(alias = "ReleaseChannel")]
     pub channel: Option<String>,
-    #[serde(rename = "AsyncShutdownTimeout")]
+    #[serde(alias = "AsyncShutdownTimeout")]
     pub async_shutdown_timeout: Option<String>,
-    #[serde(rename = "Hang")]
+    #[serde(alias = "Hang")]
     pub hang: Option<String>,
 }

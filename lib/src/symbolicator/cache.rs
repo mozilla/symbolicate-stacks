@@ -430,6 +430,7 @@ pub enum Channel {
     Beta,
     Unknown,
     Release,
+    Esr,
 }
 
 impl From<&str> for Channel {
@@ -438,6 +439,7 @@ impl From<&str> for Channel {
             "nightly" => Channel::Nightly,
             "beta" => Channel::Beta,
             "release" => Channel::Release,
+            "esr" => Channel::Esr,
             _ => Channel::Unknown,
         }
     }
