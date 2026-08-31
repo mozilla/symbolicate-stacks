@@ -11,48 +11,37 @@
 //! logical state of the cache.
 
 use debugid::DebugId;
-use std::collections::{BinaryHeap, HashMap};
-use std::mem::ManuallyDrop;
+use std::collections::BinaryHeap;
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::Relaxed},
+    atomic::{AtomicU64, AtomicUsize, Ordering::Relaxed},
     Arc, Mutex,
 };
 use tokio::sync::Notify;
 
 pub struct Cache {
     state: Arc<State>,
-    live_entries: Arc<Mutex<HashMap<Key, LiveEntry>>>,
 }
 
 #[derive(Clone)]
 pub struct CacheJob {
     state: Arc<State>,
-    live_entries: Arc<Mutex<HashMap<Key, LiveEntry>>>,
 }
 
 impl Cache {
-    pub fn new(limit: Option<u64>, persistent_storage: std::path::PathBuf) -> Self {
+    pub fn new(limit: Option<u64>, persistent_storage: std::path::PathBuf) -> (Self, Vec<Key>) {
         let persisted: PersistedState = std::fs::File::open(&persistent_storage)
             .ok()
             .and_then(|r| serde_json::from_reader(r).ok())
             .unwrap_or_default();
+        let keys = persisted.iter().map(|e| e.key.clone()).collect();
+        let current_cache_size = persisted.iter().map(|e| e.size).sum();
         let state = Arc::new(State {
-            inactive: Default::default(),
-            inactive_change: Default::default(),
-            limit: limit.map(CacheLimit::new),
+            entries: Mutex::new(persisted.into_iter().collect()),
+            entries_change: Default::default(),
+            limit: limit.map(|l| CacheLimit::new(l, current_cache_size)),
             persist: persistent_storage,
         });
-        let mut live_entries: HashMap<Key, LiveEntry> = Default::default();
-        for info in persisted {
-            let live = state.active(info.key.clone(), info.channel);
-            live.exists_with_space(info.size.load(Relaxed));
-            live_entries.insert(info.key.clone(), live);
-        }
-
-        Cache {
-            state,
-            live_entries: Arc::new(Mutex::new(live_entries)),
-        }
+        (Cache { state }, keys)
     }
 
     pub fn update_status(&self, status: &Arc<crate::Status>) {
@@ -72,14 +61,9 @@ impl Cache {
         }
     }
 
-    pub fn live_keys(&self) -> Vec<Key> {
-        self.live_entries.lock().unwrap().keys().cloned().collect()
-    }
-
     pub fn job(&self) -> CacheJob {
         CacheJob {
             state: self.state.clone(),
-            live_entries: self.live_entries.clone(),
         }
     }
 
@@ -108,22 +92,28 @@ impl CacheEvictor {
 
         tokio::select! {
             _ = waiters_changed => true,
-            _ = self.state.evict(remove) => true,
+            _ = self.state.evict(remove) => {
+                // Give waiters some time to access the newly-available cache space and clear their
+                // wait tokens. Otherwise, the eviction task may quickly run through and evict
+                // everthing before all the waiters have a chance to clear and acquire the space. We
+                // don't want to clear everything, since some things are faster to keep around (e.g.
+                // symbol maps for release binaries).
+                //
+                // There is a complicated way to do this without a sleep, but the sleep is good
+                // enough.
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                true
+            }
         }
     }
 }
 
 impl CacheJob {
-    pub fn register(&self, file: Key, channel: Channel) -> LiveEntry {
-        let entry = {
-            let mut guard = self.live_entries.lock().unwrap();
-            if !guard.contains_key(&file) {
-                guard.insert(file.clone(), self.state.active(file.clone(), channel));
-            }
-            guard.get(&file).unwrap().clone()
-        };
-        entry.set_used();
-        entry
+    pub fn register(&self, file: Key, channel: Channel) -> PendingCacheEntry {
+        PendingCacheEntry {
+            state: self.state.clone(),
+            entry: Some(Entry::new(file, channel)),
+        }
     }
 }
 
@@ -179,10 +169,10 @@ impl WaitingForSpace {
 }
 
 impl CacheLimit {
-    fn new(limit: u64) -> Self {
+    fn new(limit: u64, current: u64) -> Self {
         CacheLimit {
             limit,
-            current: 0.into(),
+            current: current.into(),
             waiting_for_space: Default::default(),
         }
     }
@@ -214,65 +204,9 @@ impl CacheLimit {
     }
 }
 
-/// A token which is held to indicate that an entry may be used.
-///
-/// When all tokens are dropped, the cache entry may be evicted.
-#[derive(Clone)]
-pub struct LiveEntry {
-    inner: Arc<LiveEntryInner>,
-}
-
-impl LiveEntry {
-    /// Reserve space in the cache for this entry. If there is not enough room, the future will
-    /// suspend.
-    pub async fn reserve_space(&self, size: u64) {
-        if let Some(limit) = &self.inner.state.limit {
-            let current = self.inner.info.size.load(Relaxed);
-            if size < current {
-                limit.return_space(current - size);
-            } else if size > current {
-                limit.wait_for_space(size - current).await;
-            }
-        }
-        self.inner.info.size.store(size, Relaxed);
-    }
-
-    /// Reserve space in the cache for this entry, regardless of the cache size limit (useful for
-    /// files that already exist).
-    pub fn exists_with_space(&self, size: u64) {
-        if let Some(limit) = &self.inner.state.limit {
-            let current = self.inner.info.size.load(Relaxed);
-            if size < current {
-                limit.return_space(current - size);
-            } else if size > current {
-                limit.take_space(size - current);
-            }
-        }
-        self.inner.info.size.store(size, Relaxed);
-        self.inner.info.exists.store(true, Relaxed);
-    }
-
-    /// Set whether the related cache entry was used.
-    fn set_used(&self) {
-        self.inner.info.used.store(true, Relaxed);
-    }
-}
-
-struct LiveEntryInner {
-    state: Arc<State>,
-    info: ManuallyDrop<Entry>,
-}
-
-impl Drop for LiveEntryInner {
-    fn drop(&mut self) {
-        self.state
-            .add_inactive(unsafe { ManuallyDrop::take(&mut self.info) });
-    }
-}
-
 struct State {
-    inactive: Mutex<BinaryHeap<Entry>>,
-    inactive_change: Notify,
+    entries: Mutex<BinaryHeap<Entry>>,
+    entries_change: Notify,
     limit: Option<CacheLimit>,
     persist: std::path::PathBuf,
 }
@@ -280,63 +214,48 @@ struct State {
 impl State {
     async fn evict<F: FnOnce(Key)>(&self, remove: F) {
         loop {
-            let to_evict = self.inactive.lock().ok().and_then(|mut bh| bh.pop());
+            let to_evict = self.entries.lock().ok().and_then(|mut bh| bh.pop());
             if let Some(entry) = to_evict {
                 log::debug!("evicting {}", entry.key);
                 self.remove_entry(entry, remove);
                 return;
             }
-            self.inactive_change.notified().await;
+            self.entries_change.notified().await;
         }
     }
 
     fn remove_entry<F: FnOnce(Key)>(&self, entry: Entry, remove: F) {
-        let size = entry.size.load(Relaxed);
+        let size = entry.size;
         remove(entry.key);
         if let Some(limit) = &self.limit {
             limit.return_space(size);
         }
     }
 
-    fn active(self: &Arc<Self>, file: Key, channel: Channel) -> LiveEntry {
-        LiveEntry {
-            inner: Arc::new(LiveEntryInner {
-                state: self.clone(),
-                info: ManuallyDrop::new(Entry::new(file, channel)),
-            }),
+    fn insert_entry(&self, entry: Entry) {
+        if let Ok(mut guard) = self.entries.lock() {
+            guard.push(entry);
         }
-    }
-
-    fn add_inactive(&self, info: Entry) {
-        if !info.exists.load(Relaxed) {
-            // Return space without queueing the entry for eviction (there's no reason to keep it
-            // around).
-            self.remove_entry(info, |_| ());
-            return;
-        }
-        if let Ok(mut guard) = self.inactive.lock() {
-            guard.push(info);
-        }
-        self.inactive_change.notify_waiters();
+        self.entries_change.notify_waiters();
     }
 }
 
 impl Drop for State {
     fn drop(&mut self) {
-        let inactive: PersistedState = self
-            .inactive
+        let entries: PersistedState = self
+            .entries
             .get_mut()
             .map(std::mem::take)
             .unwrap_or_default()
             .into_iter()
             .collect();
-        if !inactive.is_empty() {
+        if !entries.is_empty() {
             if let Some(p) = self.persist.parent() {
                 let _ = std::fs::create_dir_all(p);
             }
             match std::fs::File::create(&self.persist) {
                 Ok(f) => {
-                    if let Err(e) = serde_json::to_writer(f, &inactive) {
+                    if let Err(e) = serde_json::to_writer(f, &entries) {
                         log::error!("failed to persist cache state: {e}");
                     }
                 }
@@ -360,18 +279,59 @@ impl std::fmt::Display for Key {
     }
 }
 
+pub struct PendingCacheEntry {
+    state: Arc<State>,
+    entry: Option<Entry>,
+}
+
+impl PendingCacheEntry {
+    /// Reserve space in the cache for this entry. If there is not enough room, the future will
+    /// suspend.
+    pub async fn reserve_space(&mut self, size: u64) {
+        let entry = self.entry.as_mut().expect("entry already committed");
+        if let Some(limit) = &self.state.limit {
+            let current = entry.size;
+            if size < current {
+                limit.return_space(current - size);
+            } else if size > current {
+                limit.wait_for_space(size - current).await;
+            }
+        }
+        entry.size = size;
+    }
+
+    /// Reserve space in the cache for this entry, regardless of the cache size limit (useful for
+    /// files that already exist).
+    pub fn exists_with_space(&mut self, size: u64) {
+        let mut entry = self.entry.take().expect("entry already committed");
+        if let Some(limit) = &self.state.limit {
+            let current = entry.size;
+            if size < current {
+                limit.return_space(current - size);
+            } else if size > current {
+                limit.take_space(size - current);
+            }
+        }
+        entry.size = size;
+        self.state.insert_entry(entry);
+    }
+}
+
+impl Drop for PendingCacheEntry {
+    fn drop(&mut self) {
+        if let Some(entry) = self.entry.take() {
+            // The entry was never committed, so remove it.
+            self.state.remove_entry(entry, |_| ());
+        }
+    }
+}
+
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct Entry {
     key: Key,
     channel: Channel,
     /// The size of the debug file data on disk. 0 if unknown.
-    size: AtomicU64,
-    /// Whether this entry was referenced by the current set of data.
-    #[serde(skip)]
-    used: AtomicBool,
-    /// Whether this entry was populated (i.e., whether the space allocated was actually used).
-    #[serde(skip)]
-    exists: AtomicBool,
+    size: u64,
 }
 
 impl Entry {
@@ -379,18 +339,14 @@ impl Entry {
         Entry {
             key,
             channel,
-            size: 0.into(),
-            used: false.into(),
-            exists: false.into(),
+            size: 0,
         }
     }
 }
 
 impl PartialEq for Entry {
     fn eq(&self, other: &Self) -> bool {
-        self.used.load(Relaxed) == other.used.load(Relaxed)
-            && self.channel == other.channel
-            && self.size.load(Relaxed) == other.size.load(Relaxed)
+        self.channel == other.channel && self.size == other.size
     }
 }
 
@@ -404,20 +360,12 @@ impl PartialOrd for Entry {
 
 impl Ord for Entry {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // Unused are ordered first
-        self.used
-            .load(Relaxed)
-            .cmp(&other.used.load(Relaxed))
-            // Lesser channels (e.g. nightly) are ordered first
-            .then_with(|| self.channel.cmp(&other.channel))
+        // Lesser channels (e.g. nightly) are ordered first
+        self.channel
+            .cmp(&other.channel)
             // Larger sizes are ordered first (greedy eviction)
-            .then_with(|| {
-                self.size
-                    .load(Relaxed)
-                    .cmp(&other.size.load(Relaxed))
-                    .reverse()
-            })
-            // Things ordered less are ordered greater instead (to simplify use in `BinaryHeap`)
+            .then_with(|| self.size.cmp(&other.size).reverse())
+            // Reverse for usage in BinaryHeap
             .reverse()
     }
 }

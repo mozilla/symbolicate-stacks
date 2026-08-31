@@ -12,11 +12,9 @@ use std::{
     sync::Arc,
 };
 use tokio::{
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     sync::Notify,
 };
-
-mod progress;
 
 const DEFAULT_CONFIG_FILE: &str = "config.toml";
 
@@ -99,6 +97,7 @@ async fn handle_connection(
     mut conn: Stream,
     symbolicator: &SymbolicateStacks,
 ) -> anyhow::Result<bool> {
+    log::debug!("handling connection {conn:?}");
     let mut input = Vec::new();
     BufReader::new(&mut conn).read_until(0, &mut input).await?;
     if matches!(input.last(), Some(0)) {
@@ -110,10 +109,16 @@ async fn handle_connection(
         return Ok(false);
     }
 
+    log::debug!("symbolicating connection {conn:?}");
+
     let (status, result) = match symbolicator.symbolicate(input).await {
         Ok(v) => (b'o', v),
         Err(e) => (b'e', e.to_string()),
     };
+    log::debug!(
+        "finished symbolicating connection {conn:?} ({})",
+        if status == b'o' { "success" } else { "errored" }
+    );
     conn.write_all(&[status]).await?;
     conn.write_all(result.as_bytes()).await?;
 
@@ -148,16 +153,18 @@ fn start_server(config_file: PathBuf) -> anyhow::Result<()> {
 
         let exit = Arc::new(Notify::new());
         loop {
+            log::trace!("waiting on connection");
             let conn = tokio::select! {
                    result = listener.accept() => match result {
                        Ok(c) => c,
                        Err(e) => {
-                           eprintln!("failed to accept connection: {e}");
+                           log::error!("failed to accept connection: {e}");
                            continue;
                        }
                    },
                    _ = exit.notified() => break,
             };
+            log::debug!("accepted connection {conn:?}");
 
             let symbolicator = symbolicator.clone();
             let exit = exit.clone();

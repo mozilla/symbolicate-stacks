@@ -22,16 +22,13 @@ pub fn create_input<'a>(
         java_exception,
         oom_allocation_size: annotations.oom_size,
         ipc_channel_error: annotations.ipc_channel_error.as_deref(),
-        moz_crash_reason: annotations.moz_crash_reason.as_deref(),
         os: annotations.os.as_deref(),
         async_shutdown_timeout: annotations
             .async_shutdown_timeout
             .as_deref()
             .map(fixup_async_shutdown_timeout),
-        hang_type: annotations
-            .hang
-            .as_deref()
-            .map(|s| if s == "ui" { 1 } else { -1 }),
+        hang: annotations.hang.as_deref(),
+        js_large_allocation_failure: annotations.js_large_allocation_failure.as_deref(),
     }
 }
 
@@ -43,10 +40,10 @@ pub struct Input<'a> {
     java_exception: Option<JavaException<'a>>,
     oom_allocation_size: Option<u64>,
     ipc_channel_error: Option<&'a str>,
-    moz_crash_reason: Option<&'a str>,
     os: Option<&'a str>,
     async_shutdown_timeout: Option<Cow<'a, str>>,
-    hang_type: Option<i32>,
+    hang: Option<&'a str>,
+    js_large_allocation_failure: Option<&'a str>,
 }
 
 // AsyncShutdownTimeout has the `conditions` value serialized as a string, but it should be an

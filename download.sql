@@ -16,10 +16,10 @@ create temp table selected as (
             metrics.object.crash_stack_traces as stack_traces,
             metrics.object.crash_java_exception as java_exception,
             metrics.object.crash_async_shutdown_timeout as async_shutdown_timeout,
-            metrics.string.crash_moz_crash_reason as moz_crash_reason,
             metrics.string.crash_ipc_channel_error as ipc_channel_error,
             metrics.quantity.memory_oom_allocation_size as oom_size,
             metrics.string.crash_hang as hang,
+            metrics.string.memory_js_large_allocation_failure as js_large_allocation_failure,
             coalesce(metrics.string.crash_os, normalized_os) as os,
             coalesce(metrics.string.crash_app_channel, client_info.app_channel) as channel,
             SAFE_CAST(REGEXP_SUBSTR(coalesce(metrics.string.crash_app_display_version, client_info.app_display_version), '[0-9]*') as INT64) as major_version
@@ -32,10 +32,10 @@ create temp table selected as (
             metrics.object.crash_stack_traces as stack_traces,
             metrics.object.crash_java_exception as java_exception,
             metrics.object.crash_async_shutdown_timeout as async_shutdown_timeout,
-            metrics.string.crash_moz_crash_reason as moz_crash_reason,
             metrics.string.crash_ipc_channel_error as ipc_channel_error,
             metrics.quantity.memory_oom_allocation_size as oom_size,
             metrics.string.crash_hang as hang,
+            metrics.string.memory_js_large_allocation_failure as js_large_allocation_failure,
             coalesce(metrics.string.crash_os, normalized_os) as os,
             coalesce(metrics.string.crash_app_channel, client_info.app_channel) as channel,
             SAFE_CAST(REGEXP_SUBSTR(coalesce(metrics.string.crash_app_display_version, client_info.app_display_version), '[0-9]*') as INT64) as major_version
@@ -48,10 +48,10 @@ create temp table selected as (
             metrics.object.crash_stack_traces as stack_traces,
             metrics.object.crash_java_exception as java_exception,
             metrics.object.crash_async_shutdown_timeout as async_shutdown_timeout,
-            metrics.string.crash_moz_crash_reason as moz_crash_reason,
             metrics.string.crash_ipc_channel_error as ipc_channel_error,
             metrics.quantity.memory_oom_allocation_size as oom_size,
             metrics.string.crash_hang as hang,
+            metrics.string.memory_js_large_allocation_failure as js_large_allocation_failure,
             coalesce(metrics.string.crash_os, normalized_os) as os,
             coalesce(metrics.string.crash_app_channel, client_info.app_channel) as channel,
             SAFE_CAST(REGEXP_SUBSTR(coalesce(metrics.string.crash_app_display_version, client_info.app_display_version), '[0-9]*') as INT64) as major_version
@@ -64,10 +64,10 @@ create temp table selected as (
             metrics.object.crash_stack_traces as stack_traces,
             metrics.object.crash_java_exception as java_exception,
             metrics.object.crash_async_shutdown_timeout as async_shutdown_timeout,
-            metrics.string.crash_moz_crash_reason as moz_crash_reason,
             metrics.string.crash_ipc_channel_error as ipc_channel_error,
             metrics.quantity.memory_oom_allocation_size as oom_size,
             metrics.string.crash_hang as hang,
+            metrics.string.memory_js_large_allocation_failure as js_large_allocation_failure,
             coalesce(metrics.string.crash_os, normalized_os) as os,
             coalesce(metrics.string.crash_app_channel, client_info.app_channel) as channel,
             SAFE_CAST(REGEXP_SUBSTR(coalesce(metrics.string.crash_app_display_version, client_info.app_display_version), '[0-9]*') as INT64) as major_version
@@ -82,10 +82,10 @@ create temp table selected as (
             NULLIF(TO_JSON_STRING(stack_traces), 'null') as stack_traces,
             NULLIF(TO_JSON_STRING(java_exception), 'null') as java_exception,
             NULLIF(TO_JSON_STRING(async_shutdown_timeout), 'null') as async_shutdown_timeout,
-            moz_crash_reason,
             ipc_channel_error,
             oom_size,
             hang,
+            js_large_allocation_failure,
             os,
             channel,
             major_version
@@ -105,6 +105,15 @@ create temp table selected as (
                 or
                 (channel = 'esr' and major_version >= min_esr_version)
             )
+            and (
+                stack_traces is not null
+                or java_exception is not null
+                or async_shutdown_timeout is not null
+                or ipc_channel_error is not null
+                or oom_size is not null
+                or hang is not null
+                or js_large_allocation_failure is not null
+            )
     )
 
     select *
@@ -123,6 +132,10 @@ merge into crash_ping_ingest_external.live_ingest_log T
 using selected S
 on T.document_id = S.document_id
 when not matched then insert (time, task, document_id) values (current_timestamp(), @task_id, S.document_id);
+
+-- Query the count without `live_ingest_log` filtering so we can exit if we are
+-- not getting many results to process.
+select count(*) as ping_count from selected;
 
 select *
 from selected

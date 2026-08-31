@@ -10,13 +10,13 @@
 
 # Download crash pings, symbolicate, and upload results.
 
-from concurrent.futures import InterpreterPoolExecutor
+from concurrent.futures import InterpreterPoolExecutor, as_completed
 from concurrent.interpreters import create_queue, Queue
+from contextlib import contextmanager
 from google.cloud import bigquery
 import json
 import logging
 import os
-from siggen.generator import SignatureGenerator
 import subprocess
 import typing
 import uuid
@@ -24,6 +24,7 @@ import uuid
 PROJECT = 'moz-fx-data-shared-prod'
 STAGE_PROJECT = 'moz-fx-data-shar-nonprod-efed'
 DATASET = 'crash_ping_ingest_external'
+SYMBOLICATE_STACKS = "symbolicate-stacks"
 
 OUTPUT_TABLE_SCHEMA = [
     bigquery.SchemaField('document_id', 'STRING',
@@ -75,74 +76,68 @@ OUTPUT_TABLE_SCHEMA = [
     ),
 ]
 
+
 class PingProcessor:
     _executor: InterpreterPoolExecutor
-    _work: Queue
-    _results: Queue
 
     @staticmethod
-    def _process(num: int, q: Queue, results: Queue):
-        logging.basicConfig(level=logging.DEBUG)
-        logger = logging.getLogger(f"ping processor {num}")
-        logger.debug("started processor")
-        generator = SignatureGenerator()
-        while True:
-            doc_id, timestamp, annotations = typing.cast(tuple, q.get())
-            logging.debug("received data to process")
-            result = None
-            try:
-                logging.debug("launching symbolicate-stacks")
-                symbolicated = subprocess.run(["./target/release/symbolicate-stacks"], text=True, input=annotations, capture_output=True)
-                if symbolicated.returncode != 0:
-                    logger.error(f"symbolicate-stacks returned {symbolicated.returncode}: {symbolicated.stderr}")
-                    continue
+    def _pool_initializer():
+        from siggen.generator import SignatureGenerator
+        globals()["generator"] = SignatureGenerator()
 
-                output = symbolicated.stdout
+    @staticmethod
+    def _process_ping(annotations: str) -> str | tuple[str, str]:
+        SYMBOLICATE_STACKS = "symbolicate-stacks"
+        import json
+        import subprocess
 
-                try:
-                    sigdata = json.loads(output)
-                except json.JSONDecodeError as e:
-                    logger.error(f"symbolicate-stacks returned invalid json {e}: {symbolicated.stdout}")
-                    continue
+        symbolicated = subprocess.run([SYMBOLICATE_STACKS], text=True, input=annotations, capture_output=True)
+        if symbolicated.returncode != 0:
+            return f"symbolicate-stacks returned {symbolicated.returncode}: {symbolicated.stderr}"
 
-                generate_result = generator.generate(sigdata)
-                result = (doc_id, timestamp, generate_result.get('signature'), output)
-            finally:
-                results.put(result)
+        output = symbolicated.stdout
 
-    def __init__(self, concurrent_count: int = 32):
-        self._executor = InterpreterPoolExecutor(max_workers = concurrent_count)
-        self._work = create_queue()
-        self._results = create_queue()
+        try:
+            sigdata = json.loads(output)
+        except json.JSONDecodeError as e:
+            return f"symbolicate-stacks returned invalid json ({e}): {symbolicated.stdout}"
 
-        for i in range(concurrent_count):
-            self._executor.submit(PingProcessor._process, i+1, self._work, self._results)
+        generate_result = globals()["generator"].generate(sigdata)
+        return generate_result.signature, output
 
-    def push(self, *args):
-        self._work.put(args)
+    def __init__(self, concurrent_count: typing.Optional[int] = None):
+        # symbolicate-stacks will manage its concurrency well, so we want to
+        # make sure it is has a good supply of work to do. It's better for work
+        # to be queued in symbolicate-stacks than for latency to be introduced
+        # by queueing in python.
+        max_workers = concurrent_count or os.process_cpu_count() * 2
+        self._executor = InterpreterPoolExecutor(max_workers = max_workers, initializer = PingProcessor._pool_initializer)
 
-    def wait(self, count: int) -> list[typing.Optional[tuple[str, str, str, str]]]:
-        results = []
-        while len(results) < count:
-            results.append(typing.cast(tuple, self._results.get()))
-        return results
+    def __enter__(self):
+        self._executor.__enter__()
+        return self
 
-    def process_batch(self, rows: bigquery.table.RowIterator) -> list[tuple[str, str, str, str]]:
-        # Read all data up-front to get it in memory and close the iterator's connection.
-        total = rows.total_rows
-        for row in rows:
-            document_id = row.get("document_id")
-            timestamp = row.get("submission_timestamp")
-            self.push(document_id, timestamp, json.dumps(dict(row)))
-        return list(filter(None, self.wait(total)))
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self._executor.__exit__(exc_type, exc_val, exc_tb)
+
+    def process_batch(self, rows: bigquery.table.RowIterator) -> typing.Iterable[tuple[str, str, str | tuple[str, str]]]:
+        data = [dict(row) for row in rows]
+
+        futures = {self._executor.submit(PingProcessor._process_ping, json.dumps(r)): r for r in data}
+        
+        for result_fut in as_completed(futures):
+            row = futures[result_fut]
+            result = result_fut.result()
+            yield row["document_id"], row["submission_timestamp"], result
+
 
 class BQ:
     _client: bigquery.Client
     _download_query: str
     _task_id: str
 
-    def __init__(self, task_id: str):
-        self._client = bigquery.Client(STAGE_PROJECT)
+    def __init__(self, task_id: str, project: str):
+        self._client = bigquery.Client(project)
         with open("download.sql", 'r') as f:
             self._download_query = f.read()
         self._task_id = task_id
@@ -183,7 +178,7 @@ class BQ:
 
             self._client.create_table(table)
 
-    def download(self) -> bigquery.table.RowIterator:
+    def download(self) -> tuple[int, bigquery.table.RowIterator]:
         job_config = bigquery.QueryJobConfig(
             query_parameters = [
                 bigquery.ScalarQueryParameter("task_id", bigquery.SqlParameterScalarTypes.STRING, self._task_id),
@@ -193,8 +188,8 @@ class BQ:
         # Wait for job to complete (to ensure all child jobs are present)
         query_job.result()
         child_jobs = self._client.list_jobs(parent_job = query_job)
-        select_job = next(job for job in child_jobs if job.statement_type == "SELECT")
-        return select_job.result()
+        select_data_job, count_job, *_ = (job for job in child_jobs if job.statement_type == "SELECT")
+        return next(count_job.result(max_results=1))[0], select_data_job.result()
 
     def upload(self, data):
         self._client.load_table_from_json(
@@ -212,49 +207,81 @@ class BQ:
             ),
         )
 
-def format_results(results: list[tuple[str, str, str, str]]) -> typing.Iterable[typing.Dict[str, typing.Any]]:
+def format_results(results: typing.Iterable[tuple[str, str, str, str]]) -> typing.Iterable[typing.Dict[str, typing.Any]]:
     for document_id, submission_timestamp, signature, sym_json in results:
         sym = json.loads(sym_json)
-        threads = sym["threads"]
+        threads = sym.get("threads", [])
         yield {
                 'document_id': document_id,
                 'submission_timestamp': submission_timestamp,
                 'crash_type': sym.get("reason"),
                 'signature': signature,
-                'stack': threads[0]["frames"] if len(threads) > 0 else None
+                'stack': threads[0].get("frames") if len(threads) > 0 else None
         }
+
+def filter_errors(logger: logging.Logger, results: typing.Iterable[tuple[str, str, str | tuple[str, str]]]) -> typing.Iterable[tuple[str, str, str, str]]:
+    for doc_id, timestamp, result in results:
+        if type(result) == tuple:
+            logger.debug(f"got result for {doc_id}")
+            yield doc_id, timestamp, *result
+        else:
+            logger.error(f"error processing {doc_id}: {result}")
+
+
+@contextmanager
+def symbolicate_stacks_server():
+    def runserver(arg: str):
+        subprocess.run([SYMBOLICATE_STACKS, "--server", arg]).check_returncode()
+    runserver("start")
+    try:
+        yield
+    finally:
+        runserver("stop")
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.DEBUG)
+    import argparse
+    import time
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-l', '--loglevel', default='info', help="set the log level", choices=['critical','error','warning','info','debug'])
+    parser.add_argument('--production', action='store_true', help="use production tables")
+
+    args = parser.parse_args()
+
+    logging.Formatter.converter = time.gmtime
+    logging.basicConfig(level=args.loglevel.upper(), format="%(asctime)s %(levelname)s (%(name)s): %(message)s", datefmt="%Y-%m-%dT%H:%M:%SZ")
     task_id = os.environ.get("TASK_ID") or str(uuid.uuid4())
-    logger = logging.getLogger("run.py main")
+    logger = logging.getLogger("main")
 
     with open("download.sql", 'r') as f:
         query = f.read()
 
     total_rows = 0
     success_rows = 0
-    processor = PingProcessor()
-    bq = BQ(task_id)
-    while True:
-        logger.debug("querying ping data")
-        pings = bq.download()
-        try:
-            # Stop when we are getting fewer results to let a subsequent run do
-            # the work.
-            if pings.total_rows < 100:
-                logger.info(f"not enough rows (received {pings.total_rows}): exiting")
-                break
+    bq = BQ(task_id, PROJECT if args.production else STAGE_PROJECT)
+    with symbolicate_stacks_server(), PingProcessor() as processor:
+        while True:
+            logger.info("querying ping data")
+            avail_count, pings = bq.download()
+            try:
+                # Stop when we are getting fewer results to let a subsequent run do
+                # the work.
+                if avail_count < 100:
+                    logger.info(f"not enough rows ({avail_count} available): exiting")
+                    break
 
-            logger.debug(f"received {pings.total_rows} pings")
+                logger.info(f"received {pings.total_rows} pings")
 
-            total_rows += pings.total_rows
-            results = processor.process_batch(pings)
-            success_rows += len(results)
+                total_rows += pings.total_rows
 
-            logger.info(f"read {total_rows} ({total_rows-success_rows} failed)")
+                results = processor.process_batch(pings)
+                result_rows = list(format_results(filter_errors(logger, results)))
 
-            bq.upload(format_results(results))
-        finally:
-            bq.clear_log()
+                success_rows += len(result_rows)
+
+                logger.info(f"read {total_rows} ({total_rows-success_rows} failed)")
+
+                bq.upload(result_rows)
+            finally:
+                bq.clear_log()

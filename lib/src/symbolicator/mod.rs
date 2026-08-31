@@ -304,6 +304,7 @@ impl Symbolicator {
     pub async fn maintenance(&self) {
         let Symbolicator {
             symbol_manager: manager,
+            symbol_maps,
             cache,
             ..
         } = self;
@@ -311,7 +312,13 @@ impl Symbolicator {
         log::debug!("entering eviction loop");
         if let Some(evictor) = cache.evictor() {
             loop {
-                if !evictor.evict(|key| manager.helper().evict(&key)).await {
+                if !evictor
+                    .evict(|key| {
+                        symbol_maps.evict(&key);
+                        manager.helper().evict(&key);
+                    })
+                    .await
+                {
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 }
             }
@@ -627,6 +634,7 @@ async fn retry_requests(builder: reqwest::RequestBuilder) -> reqwest::Result<req
     let mut attempts: u32 = 0;
     loop {
         attempts += 1;
+        log::debug!("network: requesting {builder:?}");
         match builder
             .try_clone()
             .unwrap()
@@ -634,10 +642,15 @@ async fn retry_requests(builder: reqwest::RequestBuilder) -> reqwest::Result<req
             .await?
             .error_for_status()
         {
-            Ok(response) => return Ok(response),
+            Ok(response) => {
+                log::trace!("network: request success response");
+                return Ok(response);
+            }
             Err(e) => {
+                log::trace!("network: request error: {e}");
                 if let Some(status) = e.status() {
                     if RETRY_STATUS_CODES.contains(&status) && attempts < MAX_ATTEMPTS {
+                        log::debug!("received status code {status}; retrying (attempt {attempts})");
                         tokio::time::sleep(std::time::Duration::from_millis(
                             250 * 2u64.pow(attempts),
                         ))
@@ -705,12 +718,11 @@ impl FileHelper {
             .user_agent(super::APP_USER_AGENT)
             .build()?;
         let symsrv = symsrv::Symsrv::new(&cache_dir, &config.symbol_servers);
-        let cache = cache::Cache::new(
-            config.cache.size_limit_gb.limit_bytes(),
+        let (cache, keys) = cache::Cache::new(
+            config.cache.fs_size_limit_gb.limit_bytes(),
             cache_dir.join("state"),
         );
         let cache_job = cache.job();
-        let keys = cache.live_keys();
 
         Ok((
             FileHelper {
@@ -801,7 +813,7 @@ impl FileHelper {
     async fn load_breakpad_file(
         &self,
         key: &cache::Key,
-        cache_entry: &cache::LiveEntry,
+        cache_entry: &mut cache::PendingCacheEntry,
     ) -> anyhow::Result<Option<Loaded>> {
         let rel_path = key.breakpad_relative_path();
         let symindex_rel_path = key.breakpad_symindex_relative_path();
@@ -845,7 +857,7 @@ impl FileHelper {
     async fn load_symsrv_file(
         &self,
         key: &cache::Key,
-        cache_entry: &cache::LiveEntry,
+        cache_entry: &mut cache::PendingCacheEntry,
     ) -> anyhow::Result<Option<Loaded>> {
         let path = match self.symsrv.get_file(key, cache_entry).await {
             Err(e) => {
@@ -918,7 +930,7 @@ impl FileHelper {
         server: &str,
         rel_path: &str,
         symindex_rel_path: &str,
-        cache_entry: &cache::LiveEntry,
+        cache_entry: &mut cache::PendingCacheEntry,
     ) -> anyhow::Result<Loaded> {
         let url = format!("{server}/{rel_path}");
 
@@ -1106,21 +1118,24 @@ impl FileAndPathHelper for FileHelper {
                 .unwrap()
                 .contains_key(&location.key)
             {
-                let cache_entry = self
+                let mut cache_entry = self
                     .cache_job
                     .register(location.key.clone(), location.channel);
                 let loaded = 'result: {
                     let _permit = self.downloads.acquire().await;
                     let mut errors = AggregateError::new();
 
-                    match self.load_breakpad_file(&location.key, &cache_entry).await {
+                    match self
+                        .load_breakpad_file(&location.key, &mut cache_entry)
+                        .await
+                    {
                         Ok(Some(loaded)) => break 'result loaded,
                         Ok(None) => (),
                         Err(e) => errors
                             .push(e.context(format!("failed to get breakpad file for {location}"))),
                     }
 
-                    match self.load_symsrv_file(&location.key, &cache_entry).await {
+                    match self.load_symsrv_file(&location.key, &mut cache_entry).await {
                         Ok(Some(loaded)) => break 'result loaded,
                         Ok(None) => (),
                         Err(e) => errors

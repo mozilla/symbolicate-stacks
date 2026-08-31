@@ -94,4 +94,6 @@ pub struct Annotations {
     pub async_shutdown_timeout: Option<String>,
     #[serde(alias = "Hang")]
     pub hang: Option<String>,
+    #[serde(alias = "JSLargeAllocationFailure")]
+    pub js_large_allocation_failure: Option<String>,
 }

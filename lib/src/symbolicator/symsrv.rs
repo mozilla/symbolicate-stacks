@@ -27,7 +27,7 @@ impl Symsrv {
     pub async fn get_file(
         &self,
         key: &cache::Key,
-        cache_entry: &cache::LiveEntry,
+        cache_entry: &mut cache::PendingCacheEntry,
     ) -> anyhow::Result<std::path::PathBuf> {
         // SymsrvObserver doesn't have async methods, so we can't suspend a download from
         // occurring. There's no point in trying to use the detected `total_bytes`: we could do a

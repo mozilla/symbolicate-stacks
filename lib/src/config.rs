@@ -11,7 +11,7 @@ pub struct Config {
 #[derive(Debug, Deserialize)]
 pub struct Cache {
     #[serde(default)]
-    pub size_limit_gb: CacheSizeLimit,
+    pub fs_size_limit_gb: CacheSizeLimit,
     pub directory: std::path::PathBuf,
 }
 

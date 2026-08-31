@@ -61,6 +61,10 @@ impl SymbolMaps {
             channel,
         }
     }
+
+    pub fn evict(&self, key: &cache::Key) {
+        self.inner.lock().unwrap().remove(key);
+    }
 }
 
 impl SymbolMapGetter {

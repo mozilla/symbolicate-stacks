@@ -4,4 +4,4 @@ windows = ["https://symbols.mozilla.org/try", "https://msdl.microsoft.com/downlo
 
 [cache]
 directory = "symbolicate_cache"
-size_limit_gb = 20
+fs_size_limit_gb = 30

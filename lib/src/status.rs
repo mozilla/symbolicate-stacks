@@ -34,10 +34,14 @@ impl Status {
     pub(crate) fn new(config: &crate::Config) -> Self {
         Status {
             pings: Default::default(),
-            cache: config.cache.size_limit_gb.limit_bytes().map(|total| Cache {
-                get_current: Default::default(),
-                total,
-            }),
+            cache: config
+                .cache
+                .fs_size_limit_gb
+                .limit_bytes()
+                .map(|total| Cache {
+                    get_current: Default::default(),
+                    total,
+                }),
             cancel: Default::default(),
         }
     }
@@ -118,6 +122,7 @@ impl Cancel {
         self.cancelled.load(Relaxed)
     }
 
+    #[allow(unused)]
     pub fn on_cancel<F: FnOnce() + Send + 'static>(&self, f: F) {
         if let Ok(mut guard) = self.on_cancel.lock() {
             if self.is_cancelled() {
