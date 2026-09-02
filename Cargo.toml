@@ -2,6 +2,7 @@
 name = "symbolicate-stacks"
 version = "0.1.0"
 edition = "2024"
+publish = false
 
 [workspace]
 
@@ -19,3 +20,19 @@ serde_json = "1"
 term = "1"
 tokio = { version = "1", features = ["full"] }
 toml = "0.8"
+
+[package.metadata.release]
+tag-name = "{{version}}"
+pre-release-commit-message = "Prepare for version {{version}}"
+tag-message = "Release {{crate_name}} version {{version}}"
+publish = false
+
+[[package.metadata.release.pre-release-replacements]]
+file = "ChangeLog.md"
+search = "## \\[Unreleased\\]"
+replace = "## [Unreleased]\n\n## [{{version}}] - {{date}}"
+
+#[[package.metadata.release.pre-release-replacements]]
+#file = "ChangeLog.md"
+#search = "\\[Unreleased\\]: (.*)/(.*)\\.\\.\\.HEAD$"
+#replace = "[Unreleased]: $1/{{tag_name}}...HEAD\n[{{version}}]: $1/$2...{{tag_name}}"
