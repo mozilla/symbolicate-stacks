@@ -254,9 +254,6 @@ if __name__ == "__main__":
     task_id = os.environ.get("TASK_ID") or str(uuid.uuid4())
     logger = logging.getLogger("main")
 
-    with open("download.sql", 'r') as f:
-        query = f.read()
-
     total_rows = 0
     success_rows = 0
     bq = BQ(task_id, PROJECT if args.production else STAGE_PROJECT)
