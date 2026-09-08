@@ -184,7 +184,7 @@ class BQ:
                 bigquery.ScalarQueryParameter("task_id", bigquery.SqlParameterScalarTypes.STRING, self._task_id),
             ],
         )
-        query_job = self._client.query(query, job_config = job_config)
+        query_job = self._client.query(self._download_query, job_config = job_config)
         # Wait for job to complete (to ensure all child jobs are present)
         query_job.result()
         child_jobs = self._client.list_jobs(parent_job = query_job)
