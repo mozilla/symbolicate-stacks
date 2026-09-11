@@ -1,3 +1,7 @@
+[workspace]
+members = ["lib/"]
+resolver = "3"
+
 [package]
 name = "symbolicate-stacks"
 version = "0.1.0"
