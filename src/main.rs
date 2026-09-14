@@ -36,13 +36,14 @@ enum ServerCommand {
     Start,
     /// Stop the server, if running.
     Stop,
+    /// Do not use a server (one-shot processing).
+    None,
 }
 
-/// Crash symbolication.
+/// Symbolicate StackTraces from crash annotations, and output a format compatible with signature
+/// generation.
 ///
-/// All configuration is passed as TOML. In order from lowest to highest precedence: `config_file`
-/// and command-line arguments can have TOML data which are merged to determine the final
-/// configuration.
+/// All configuration is passed as TOML through `config_file`.
 #[derive(Debug, Parser)]
 struct Args {
     /// The path to the config file. If unspecified, uses `config.toml` (if it exists).
@@ -125,7 +126,10 @@ async fn handle_connection(
     Ok(true)
 }
 
-fn start_server(config_file: PathBuf) -> anyhow::Result<()> {
+fn run_with_symbolicator<F: AsyncFnOnce(&Arc<SymbolicateStacks>)>(
+    config_file: PathBuf,
+    f: F,
+) -> anyhow::Result<()> {
     let config: Config = std::fs::read_to_string(&config_file)
         .map_err(|e| anyhow::Error::from(e))
         .and_then(|s| Ok(toml::from_str(&s)?))
@@ -141,45 +145,12 @@ fn start_server(config_file: PathBuf) -> anyhow::Result<()> {
     let symbolicator = Arc::new(SymbolicateStacks::new(config)?);
 
     builder.build()?.block_on(async move {
-        let listener = ListenerOptions::new()
-            .name(local_socket_name())
-            .create_tokio()
-            .expect("failed to create socket listener");
-
         let maintenance_task = {
             let symbolicator = symbolicator.clone();
             tokio::spawn(async move { symbolicator.maintenance().await })
         };
 
-        let exit = Arc::new(Notify::new());
-        loop {
-            log::trace!("waiting on connection");
-            let conn = tokio::select! {
-                   result = listener.accept() => match result {
-                       Ok(c) => c,
-                       Err(e) => {
-                           log::error!("failed to accept connection: {e}");
-                           continue;
-                       }
-                   },
-                   _ = exit.notified() => break,
-            };
-            log::debug!("accepted connection {conn:?}");
-
-            let symbolicator = symbolicator.clone();
-            let exit = exit.clone();
-
-            tokio::spawn(async move {
-                match handle_connection(conn, &symbolicator).await {
-                    Ok(should_continue) => {
-                        if !should_continue {
-                            exit.notify_one();
-                        }
-                    }
-                    Err(e) => log::error!("error handling connection: {e}"),
-                }
-            });
-        }
+        f(&symbolicator).await;
 
         maintenance_task.abort();
 
@@ -196,6 +167,43 @@ fn start_server(config_file: PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn run_server(symbolicator: &Arc<SymbolicateStacks>) {
+    let listener = ListenerOptions::new()
+        .name(local_socket_name())
+        .create_tokio()
+        .expect("failed to create socket listener");
+
+    let exit = Arc::new(Notify::new());
+    loop {
+        log::trace!("waiting on connection");
+        let conn = tokio::select! {
+               result = listener.accept() => match result {
+                   Ok(c) => c,
+                   Err(e) => {
+                       log::error!("failed to accept connection: {e}");
+                       continue;
+                   }
+               },
+               _ = exit.notified() => break,
+        };
+        log::debug!("accepted connection {conn:?}");
+
+        let symbolicator = symbolicator.clone();
+        let exit = exit.clone();
+
+        tokio::spawn(async move {
+            match handle_connection(conn, &symbolicator).await {
+                Ok(should_continue) => {
+                    if !should_continue {
+                        exit.notify_one();
+                    }
+                }
+                Err(e) => log::error!("error handling connection: {e}"),
+            }
+        });
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     env_logger::builder()
         .filter_level(log::LevelFilter::Warn)
@@ -206,7 +214,7 @@ fn main() -> anyhow::Result<()> {
 
     let config_file = args.config_file.unwrap_or(DEFAULT_CONFIG_FILE.into());
 
-    let should_start_server = !matches!(args.server, Some(ServerCommand::Stop));
+    let should_start_server = matches!(args.server, None | Some(ServerCommand::Start));
 
     if should_start_server && !server_exists() {
         let stderr = std::fs::File::create(log_path()).unwrap();
@@ -231,7 +239,7 @@ fn main() -> anyhow::Result<()> {
             }
             Outcome::Child(child) => {
                 child.expect("failed to daemonize server");
-                start_server(config_file).expect("failed to start server");
+                run_with_symbolicator(config_file, run_server).expect("failed to start server");
                 return Ok(());
             }
         }
@@ -268,6 +276,31 @@ fn main() -> anyhow::Result<()> {
                     .expect("failed to read from server"),
                 _ => unreachable!(),
             };
+        }
+        Some(ServerCommand::None) => {
+            let input = args
+                .input_file
+                .map(|path| std::fs::read_to_string(path))
+                .unwrap_or_else(|| {
+                    let mut s = String::new();
+                    std::io::stdin().read_to_string(&mut s)?;
+                    Ok(s)
+                })?;
+
+            let mut output = args
+                .output_file
+                .map(|path| std::fs::File::create(path).map(|f| Box::new(f) as Box<dyn Write>))
+                .unwrap_or_else(|| Ok(Box::new(std::io::stdout())))?;
+
+            run_with_symbolicator(config_file, async move |symbolicator| {
+                match symbolicator.symbolicate(input).await {
+                    Ok(s) => write!(output, "{}", s).expect("failed to write output"),
+                    Err(e) => {
+                        write!(std::io::stderr(), "{}", e).expect("failed to write to stderr")
+                    }
+                }
+            })
+            .expect("failed to start symbolicator");
         }
         Some(ServerCommand::Start) => {}
         Some(ServerCommand::Stop) => {
