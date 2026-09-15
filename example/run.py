@@ -138,7 +138,8 @@ class BQ:
 
     def __init__(self, task_id: str, project: str):
         self._client = bigquery.Client(project)
-        with open("download.sql", 'r') as f:
+        script_dir = os.path.dirname(os.path.realpath(__file__))
+        with open(f"{script_dir}/download.sql", 'r') as f:
             self._download_query = f.read()
         self._task_id = task_id
         self.create_tables()
