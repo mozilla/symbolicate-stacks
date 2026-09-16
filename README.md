@@ -25,10 +25,14 @@ Once running, the server will accept new socket connections and supports the fol
 
 - `ping`: the server will respond with `pong` and close the connection.
 - `close`: the server will shutdown.
+- a JSON crash annotations string.
 
-Any other input is parsed as JSON crash annotations. Symbolication of the `StackTraces` annotation
-then commences. Upon success, an `o` byte (for "output") is written to the connection, followed by
-the JSON response. Upon failure, an `e` byte is written (for "error") and an error message follows.
+Commands should be followed by a nul (0) byte to indicate end of data if a response is expected
+(`ping` and crash annotations processing).
+
+When a crash annotation string is received, symbolication of the `StackTraces` annotation then
+commences. Upon success, an `o` byte (for "output") is written to the connection, followed by the
+JSON response. Upon failure, an `e` byte is written (for "error") and an error message follows.
 
 #### Exit codes
 
@@ -56,6 +60,29 @@ result to `--output-file` or stdout (in case of success), or an error message to
 - `1`: failed symbolication (printing the error from the server to stderr)
 - `101`: fatal client error (printing panic details)
 
+### `control`
+
+The `control` subcommand sends control messages to a running server. It supports the following
+messages (as subcommands):
+
+#### `ping`
+
+Send a ping to the server.
+
+##### Exit codes
+
+- `0`: successful ping and response
+- `1`: error occurred (logged to stderr)
+
+#### `stop`
+
+Stop a running server.
+
+##### Exit codes
+
+- `0`: successfully sent the `close` command
+- `1`: error occurred (logged to stderr)
+
 ### `standalone`
 
 The `standalone` subcommand runs one-shot symbolication without using a server. It accepts
@@ -70,7 +97,8 @@ and behaves similarly.
 
 ## Logging
 
-Logs are sent to stderr. The log level can be changed with `RUST_LOG`.
+Logs are sent to stderr. The log level can be changed by setting the `RUST_LOG` environment variable
+to choose the log level and filtering (see the [env_logger docs][]).
 
 ## Configuration
 
@@ -92,3 +120,4 @@ This script is not meant for production use: it merely showcases a method of usi
 `symbolicate-stacks`.
 
 [siggen schema]: https://github.com/mozilla-services/socorro-siggen#signature-generation-crash-data-schema
+[env_logger docs]: https://docs.rs/env_logger/latest/env_logger/index.html#enabling-logging

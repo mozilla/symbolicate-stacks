@@ -53,7 +53,18 @@ pub fn connect() -> std::io::Result<interprocess::local_socket::Stream> {
     interprocess::local_socket::Stream::connect(local_socket_name())
 }
 
-#[allow(unused)]
+pub fn ping() -> std::io::Result<()> {
+    let mut conn = connect()?;
+    conn.write_all(b"ping\0")?;
+    let mut response = Vec::new();
+    conn.read_to_end(&mut response)?;
+    if response != b"pong" {
+        Err(std::io::Error::other("unexpected response"))
+    } else {
+        Ok(())
+    }
+}
+
 pub fn close() -> std::io::Result<()> {
     connect()?.write_all(b"close")
 }

@@ -30,8 +30,11 @@ enum Command {
     ///
     /// The server does not daemonize.
     Server(LaunchArgs),
-    /// Run symbolication as a client to a previously started server.
+    /// Symbolicate stack traces using a running server.
     Client(SymbolicationArgs),
+    /// Send control messages to a running server.
+    #[command(subcommand)]
+    Control(ControlCommand),
     /// Run symbolication as one-shot processing without using a server.
     Standalone {
         #[command(flatten)]
@@ -65,6 +68,16 @@ struct SymbolicationArgs {
     /// The path to which to write the output. If unspecified, output is written to stdout.
     #[arg(short, long)]
     output_file: Option<PathBuf>,
+}
+
+#[derive(Debug, Subcommand)]
+enum ControlCommand {
+    /// Ping a running server.
+    ///
+    /// Exits with a 0 code if the server responded, otherwise 1.
+    Ping,
+    /// Shutdown a running server.
+    Stop,
 }
 
 /// Symbolicate StackTraces from crash annotations, and output a format compatible with signature
@@ -176,6 +189,18 @@ fn main() {
                 }
                 _ => unreachable!(),
             };
+        }
+        Command::Control(ControlCommand::Ping) => {
+            if let Err(e) = server::ping() {
+                log::error!("failed to ping server: {e}");
+                std::process::exit(1);
+            }
+        }
+        Command::Control(ControlCommand::Stop) => {
+            if let Err(e) = server::close() {
+                log::error!("failed to connect to server: {e}");
+                std::process::exit(1);
+            }
         }
         Command::Standalone {
             launch_args,
