@@ -1,4 +1,9 @@
 ## [Unreleased]
+- Reorganize example code into a subdirectory.
+- Change the operating paradigm to explicitly launch the server.
+- Add a standalone execution mode.
+- Change the CLI to take subcommands to determine behavior.
+- Add a `ping` command to check server comms health.
 
 ## [0.1.0] - 2026-09-02
 - Initial release.
