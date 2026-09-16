@@ -1,20 +1,13 @@
 use anyhow::Context;
-use clap::{Parser, ValueEnum};
-use daemonize::{Daemonize, Outcome};
-use interprocess::local_socket::{
-    GenericFilePath, ListenerOptions, Name,
-    tokio::{Stream, prelude::*},
-};
+use clap::{Args, Parser, Subcommand};
 use lib::{Config, SymbolicateStacks, config::WorkerThreads};
 use std::{
     io::{Read, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Arc,
 };
-use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    sync::Notify,
-};
+
+mod server;
 
 const DEFAULT_CONFIG_FILE: &str = "config.toml";
 
@@ -30,31 +23,41 @@ fn existing_path(s: &str) -> std::io::Result<PathBuf> {
     }
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
-enum ServerCommand {
-    /// Start the server.
-    Start,
-    /// Stop the server, if running.
-    Stop,
-    /// Do not use a server (one-shot processing).
-    None,
+/// The operating mode of the program.
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Start a server with which clients will communicate.
+    ///
+    /// The server does not daemonize.
+    Server(LaunchArgs),
+    /// Run symbolication as a client to a previously started server.
+    Client(SymbolicationArgs),
+    /// Run symbolication as one-shot processing without using a server.
+    Standalone {
+        #[command(flatten)]
+        launch_args: LaunchArgs,
+        #[command(flatten)]
+        symbolication_args: SymbolicationArgs,
+    },
 }
 
-/// Symbolicate StackTraces from crash annotations, and output a format compatible with signature
-/// generation.
-///
-/// All configuration is passed as TOML through `config_file`.
-#[derive(Debug, Parser)]
-struct Args {
+#[derive(Debug, Args)]
+struct LaunchArgs {
     /// The path to the config file. If unspecified, uses `config.toml` (if it exists).
-    /// This configuration is only used if the server hasn't been started.
     #[arg(long, value_parser = existing_path)]
     config_file: Option<PathBuf>,
+}
 
-    /// Command the server.
-    #[arg(short, long)]
-    server: Option<ServerCommand>,
+impl LaunchArgs {
+    pub fn config_file(&self) -> &Path {
+        self.config_file
+            .as_deref()
+            .unwrap_or_else(|| Path::new(DEFAULT_CONFIG_FILE))
+    }
+}
 
+#[derive(Debug, Args)]
+struct SymbolicationArgs {
     /// The path from which to read input. If unspecified, input is read from stdin.
     #[arg(short, long)]
     input_file: Option<PathBuf>,
@@ -64,70 +67,16 @@ struct Args {
     output_file: Option<PathBuf>,
 }
 
-fn runtime_dir() -> PathBuf {
-    std::env::var("XDG_RUNTIME_DIR")
-        .map(|s| s.into())
-        .unwrap_or_else(|_| std::env::temp_dir())
-}
-
-fn log_path() -> PathBuf {
-    runtime_dir().join("symbolicate-stacks.err")
-}
-
-fn pid_path() -> PathBuf {
-    runtime_dir().join("symbolicate-stacks.pid")
-}
-
-fn local_socket_path() -> PathBuf {
-    runtime_dir().join("symbolicate-stacks.sock")
-}
-
-fn local_socket_name() -> Name<'static> {
-    local_socket_path().to_fs_name::<GenericFilePath>().unwrap()
-}
-
-fn server_exists() -> bool {
-    if let Ok(file) = std::fs::File::open(pid_path()) {
-        matches!(file.try_lock(), Err(std::fs::TryLockError::WouldBlock))
-    } else {
-        false
-    }
-}
-
-async fn handle_connection(
-    mut conn: Stream,
-    symbolicator: &SymbolicateStacks,
-) -> anyhow::Result<bool> {
-    log::debug!("handling connection {conn:?}");
-    let mut input = Vec::new();
-    BufReader::new(&mut conn).read_until(0, &mut input).await?;
-    if matches!(input.last(), Some(0)) {
-        input.pop();
-    }
-    let input = String::from_utf8(input)?;
-
-    if input == "close" {
-        return Ok(false);
-    }
-
-    log::debug!("symbolicating connection {conn:?}");
-
-    let (status, result) = match symbolicator.symbolicate(input).await {
-        Ok(v) => (b'o', v),
-        Err(e) => (b'e', e.to_string()),
-    };
-    log::debug!(
-        "finished symbolicating connection {conn:?} ({})",
-        if status == b'o' { "success" } else { "errored" }
-    );
-    conn.write_all(&[status]).await?;
-    conn.write_all(result.as_bytes()).await?;
-
-    Ok(true)
+/// Symbolicate StackTraces from crash annotations, and output a format compatible with signature
+/// generation.
+#[derive(Debug, Parser)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
 }
 
 fn run_with_symbolicator<F: AsyncFnOnce(&Arc<SymbolicateStacks>)>(
-    config_file: PathBuf,
+    config_file: &Path,
     f: F,
 ) -> anyhow::Result<()> {
     let config: Config = std::fs::read_to_string(&config_file)
@@ -167,88 +116,35 @@ fn run_with_symbolicator<F: AsyncFnOnce(&Arc<SymbolicateStacks>)>(
     Ok(())
 }
 
-async fn run_server(symbolicator: &Arc<SymbolicateStacks>) {
-    let listener = ListenerOptions::new()
-        .name(local_socket_name())
-        .create_tokio()
-        .expect("failed to create socket listener");
-
-    let exit = Arc::new(Notify::new());
-    loop {
-        log::trace!("waiting on connection");
-        let conn = tokio::select! {
-               result = listener.accept() => match result {
-                   Ok(c) => c,
-                   Err(e) => {
-                       log::error!("failed to accept connection: {e}");
-                       continue;
-                   }
-               },
-               _ = exit.notified() => break,
-        };
-        log::debug!("accepted connection {conn:?}");
-
-        let symbolicator = symbolicator.clone();
-        let exit = exit.clone();
-
-        tokio::spawn(async move {
-            match handle_connection(conn, &symbolicator).await {
-                Ok(should_continue) => {
-                    if !should_continue {
-                        exit.notify_one();
-                    }
-                }
-                Err(e) => log::error!("error handling connection: {e}"),
-            }
-        });
-    }
-}
-
 fn main() -> anyhow::Result<()> {
     env_logger::builder()
         .filter_level(log::LevelFilter::Warn)
         .parse_default_env()
         .init();
 
-    let args = Args::parse();
+    let cli = Cli::parse();
 
-    let config_file = args.config_file.unwrap_or(DEFAULT_CONFIG_FILE.into());
-
-    let should_start_server = matches!(args.server, None | Some(ServerCommand::Start));
-
-    if should_start_server && !server_exists() {
-        let stderr = std::fs::File::create(log_path()).unwrap();
-        let outcome = Daemonize::new()
-            .pid_file(pid_path())
-            .working_directory(std::env::current_dir().unwrap())
-            .stderr(stderr)
-            .execute();
-        match outcome {
-            Outcome::Parent(result) => {
-                result.expect("failed to daemonize server");
-                if args.server.is_none() {
-                    let timeout = std::time::Instant::now() + std::time::Duration::from_secs(1);
-                    while !local_socket_path().exists() {
-                        if std::time::Instant::now() > timeout {
-                            log::error!("daemonized server didn't open socket");
-                            break;
-                        }
-                        std::thread::sleep(std::time::Duration::from_millis(10));
-                    }
-                }
+    match cli.command {
+        Command::Server(args) => {
+            if let Some(pid) = server::exists() {
+                log::error!(
+                    "only one server can run at a time (pid {} already running)",
+                    pid
+                );
+                std::process::exit(1);
             }
-            Outcome::Child(child) => {
-                child.expect("failed to daemonize server");
-                run_with_symbolicator(config_file, run_server).expect("failed to start server");
-                return Ok(());
+
+            if let Err(e) = server::acquire_pid_lock() {
+                log::error!("{e:#}");
+                std::process::exit(1);
+            }
+
+            if let Err(e) = run_with_symbolicator(args.config_file(), server::run) {
+                log::error!("failed to start server: {e:#}");
+                std::process::exit(1);
             }
         }
-    }
-
-    use interprocess::local_socket::traits::Stream;
-
-    match args.server {
-        None => {
+        Command::Client(args) => {
             let mut input = args
                 .input_file
                 .map(|path| std::fs::File::open(path).map(|s| Box::new(s) as Box<dyn Read>))
@@ -259,8 +155,7 @@ fn main() -> anyhow::Result<()> {
                 .map(|path| std::fs::File::create(path).map(|f| Box::new(f) as Box<dyn Write>))
                 .unwrap_or_else(|| Ok(Box::new(std::io::stdout())))?;
 
-            let mut conn = interprocess::local_socket::Stream::connect(local_socket_name())
-                .expect("failed to connect to server");
+            let mut conn = server::connect().expect("failed to connect to server");
 
             std::io::copy(&mut input, &mut conn).expect("failed to write input to server");
             conn.write_all(&[0])
@@ -277,8 +172,11 @@ fn main() -> anyhow::Result<()> {
                 _ => unreachable!(),
             };
         }
-        Some(ServerCommand::None) => {
-            let input = args
+        Command::Standalone {
+            launch_args,
+            symbolication_args,
+        } => {
+            let input = symbolication_args
                 .input_file
                 .map(|path| std::fs::read_to_string(path))
                 .unwrap_or_else(|| {
@@ -287,12 +185,12 @@ fn main() -> anyhow::Result<()> {
                     Ok(s)
                 })?;
 
-            let mut output = args
+            let mut output = symbolication_args
                 .output_file
                 .map(|path| std::fs::File::create(path).map(|f| Box::new(f) as Box<dyn Write>))
                 .unwrap_or_else(|| Ok(Box::new(std::io::stdout())))?;
 
-            run_with_symbolicator(config_file, async move |symbolicator| {
+            run_with_symbolicator(launch_args.config_file(), async move |symbolicator| {
                 match symbolicator.symbolicate(input).await {
                     Ok(s) => write!(output, "{}", s).expect("failed to write output"),
                     Err(e) => {
@@ -301,14 +199,6 @@ fn main() -> anyhow::Result<()> {
                 }
             })
             .expect("failed to start symbolicator");
-        }
-        Some(ServerCommand::Start) => {}
-        Some(ServerCommand::Stop) => {
-            if server_exists() {
-                let mut conn = interprocess::local_socket::Stream::connect(local_socket_name())
-                    .expect("failed to connect to server");
-                conn.write_all(b"close").expect("failed to write to server");
-            }
         }
     }
 
