@@ -72,6 +72,9 @@ async fn handle_connection(
 
     if input == "close" {
         return Ok(false);
+    } else if input == "ping" {
+        conn.write_all(b"pong").await?;
+        return Ok(true);
     }
 
     log::debug!("symbolicating connection {conn:?}");
