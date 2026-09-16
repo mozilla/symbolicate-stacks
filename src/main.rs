@@ -116,7 +116,7 @@ fn run_with_symbolicator<F: AsyncFnOnce(&Arc<SymbolicateStacks>)>(
     Ok(())
 }
 
-fn main() -> anyhow::Result<()> {
+fn main() {
     env_logger::builder()
         .filter_level(log::LevelFilter::Warn)
         .parse_default_env()
@@ -131,12 +131,12 @@ fn main() -> anyhow::Result<()> {
                     "only one server can run at a time (pid {} already running)",
                     pid
                 );
-                std::process::exit(1);
+                std::process::exit(2);
             }
 
             if let Err(e) = server::acquire_pid_lock() {
                 log::error!("{e:#}");
-                std::process::exit(1);
+                std::process::exit(2);
             }
 
             if let Err(e) = run_with_symbolicator(args.config_file(), server::run) {
@@ -148,12 +148,14 @@ fn main() -> anyhow::Result<()> {
             let mut input = args
                 .input_file
                 .map(|path| std::fs::File::open(path).map(|s| Box::new(s) as Box<dyn Read>))
-                .unwrap_or_else(|| Ok(Box::new(std::io::stdin()) as Box<dyn Read>))?;
+                .unwrap_or_else(|| Ok(Box::new(std::io::stdin()) as Box<dyn Read>))
+                .expect("failed to open input stream");
 
             let mut output = args
                 .output_file
                 .map(|path| std::fs::File::create(path).map(|f| Box::new(f) as Box<dyn Write>))
-                .unwrap_or_else(|| Ok(Box::new(std::io::stdout())))?;
+                .unwrap_or_else(|| Ok(Box::new(std::io::stdout())))
+                .expect("failed to open output stream");
 
             let mut conn = server::connect().expect("failed to connect to server");
 
@@ -167,8 +169,11 @@ fn main() -> anyhow::Result<()> {
 
             match status[0] {
                 b'o' => std::io::copy(&mut conn, &mut output).expect("failed to read from server"),
-                b'e' => std::io::copy(&mut conn, &mut std::io::stderr())
-                    .expect("failed to read from server"),
+                b'e' => {
+                    std::io::copy(&mut conn, &mut std::io::stderr())
+                        .expect("failed to read from server");
+                    std::process::exit(1);
+                }
                 _ => unreachable!(),
             };
         }
@@ -183,24 +188,25 @@ fn main() -> anyhow::Result<()> {
                     let mut s = String::new();
                     std::io::stdin().read_to_string(&mut s)?;
                     Ok(s)
-                })?;
+                })
+                .expect("failed to read input");
 
             let mut output = symbolication_args
                 .output_file
                 .map(|path| std::fs::File::create(path).map(|f| Box::new(f) as Box<dyn Write>))
-                .unwrap_or_else(|| Ok(Box::new(std::io::stdout())))?;
+                .unwrap_or_else(|| Ok(Box::new(std::io::stdout())))
+                .expect("failed to open output stream");
 
             run_with_symbolicator(launch_args.config_file(), async move |symbolicator| {
                 match symbolicator.symbolicate(input).await {
                     Ok(s) => write!(output, "{}", s).expect("failed to write output"),
                     Err(e) => {
-                        write!(std::io::stderr(), "{}", e).expect("failed to write to stderr")
+                        write!(std::io::stderr(), "{}", e).expect("failed to write to stderr");
+                        std::process::exit(1);
                     }
                 }
             })
             .expect("failed to start symbolicator");
         }
     }
-
-    Ok(())
 }

@@ -1,0 +1,24 @@
+## Configuration for symbolication.
+
+## The number of worker threads to use. May be one of "auto" (the default,
+## determined from the number of available cores, or the `TOKIO_WORKER_THREADS`
+## env variable), or a number.
+worker_threads = "auto"
+
+## Symbol server configuration
+[symbol_servers]
+## Breakpad-format symbol servers
+breakpad = ["https://symbols.mozilla.org/try"]
+## Windows-format (symsrv) symbol servers
+windows = ["https://symbols.mozilla.org/try", "https://msdl.microsoft.com/download/symbols"]
+## The number of concurrent downloads to allow (default 4).
+concurrency = 4
+
+[cache]
+## The directory in which to store cached symbol files.
+directory = "symbolicate_cache"
+## The size limit of cached symbol files, in GB. May be one of "none" (the
+## default, for no limit) or a number. When the limit is reached, files are
+## evicted based on associated release channel (the preference being to keep
+## files associated with longer-lived channels).
+fs_size_limit_gb = 30

@@ -1,7 +1,0 @@
-[symbol_servers]
-breakpad = ["https://symbols.mozilla.org/try"]
-windows = ["https://symbols.mozilla.org/try", "https://msdl.microsoft.com/download/symbols"]
-
-[cache]
-directory = "symbolicate_cache"
-fs_size_limit_gb = 30
