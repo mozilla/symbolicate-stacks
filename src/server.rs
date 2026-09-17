@@ -15,6 +15,7 @@ use std::{
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     sync::Notify,
+    task::JoinSet,
 };
 
 fn runtime_dir() -> PathBuf {
@@ -146,24 +147,43 @@ pub async fn run(symbolicator: &Arc<SymbolicateStacks>) {
         }
     }
 
+    let mut tasks = JoinSet::new();
+
     loop {
         log::trace!("waiting on connection");
         let conn = tokio::select! {
-               result = listener.accept() => match result {
-                   Ok(c) => c,
-                   Err(e) => {
-                       log::error!("failed to accept connection: {e}");
-                       continue;
-                   }
-               },
-               _ = exit.notified() => break,
+            _ = exit.notified() => break,
+            Some(result) = tasks.join_next(), if !tasks.is_empty() => {
+                log::trace!("reaped task: {result:?}");
+                // Don't move the `Err` pattern into the `tokio::select!`, because once unmatched we
+                // wouldn't poll `tasks.join_next()` again until one of the other branches executes.
+                if let Err(task_err) = result {
+                    if let Ok(panic) = task_err.try_into_panic() {
+                        if let Some(s) = panic.downcast_ref::<&'static str>() {
+                            log::error!("task panicked: {s}");
+                        } else if let Some(s) = panic.downcast_ref::<String>() {
+                            log::error!("task panicked: {s}");
+                        } else {
+                            log::error!("task panicked");
+                        }
+                    }
+                }
+                continue
+            },
+            result = listener.accept() => match result {
+                Ok(c) => c,
+                Err(e) => {
+                    log::error!("failed to accept connection: {e}");
+                    continue;
+                }
+            },
         };
         log::debug!("accepted connection {conn:?}");
 
         let symbolicator = symbolicator.clone();
         let exit = exit.clone();
 
-        tokio::spawn(async move {
+        tasks.spawn(async move {
             match handle_connection(conn, &symbolicator).await {
                 Ok(should_continue) => {
                     if !should_continue {
@@ -174,4 +194,12 @@ pub async fn run(symbolicator: &Arc<SymbolicateStacks>) {
             }
         });
     }
+
+    log::info!("closing listener socket");
+    drop(listener);
+
+    log::info!("cleaning up remaining tasks");
+    tasks.join_all().await;
+
+    log::info!("server closed");
 }
