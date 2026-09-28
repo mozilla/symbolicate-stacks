@@ -1,5 +1,8 @@
 //! Status tracking.
 
+// This interface isn't currently used.
+#![allow(unused)]
+
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed},
     Mutex,

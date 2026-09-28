@@ -2,7 +2,7 @@
 //! resolved concurrently, and that there are no lingering references (by e.g. holding the value
 //! too long), which would prevent cache eviction.
 
-use super::{cache, FileHelper, Location};
+use super::{FileHelper, Key, Location};
 use futures_util::{
     future::{FutureExt, Shared},
     stream::FuturesUnordered,
@@ -14,13 +14,12 @@ use tokio::task::JoinHandle;
 
 #[derive(Default)]
 pub struct SymbolMaps {
-    inner: Arc<std::sync::Mutex<HashMap<cache::Key, Shared<LoadSymbolMap>>>>,
+    inner: Arc<std::sync::Mutex<HashMap<Key, Shared<LoadSymbolMap>>>>,
 }
 
 pub struct SymbolMapGetter {
-    inner: Arc<std::sync::Mutex<HashMap<cache::Key, Shared<LoadSymbolMap>>>>,
+    inner: Arc<std::sync::Mutex<HashMap<Key, Shared<LoadSymbolMap>>>>,
     manager: Arc<SymbolManager<FileHelper>>,
-    channel: cache::Channel,
 }
 
 pub(super) type LoadedSymbolMap = Arc<SymbolMap<FileHelper>>;
@@ -50,27 +49,18 @@ impl std::future::Future for LoadSymbolMap {
 }
 
 impl SymbolMaps {
-    pub fn getter(
-        &self,
-        manager: Arc<SymbolManager<FileHelper>>,
-        channel: cache::Channel,
-    ) -> SymbolMapGetter {
+    pub fn getter(&self, manager: Arc<SymbolManager<FileHelper>>) -> SymbolMapGetter {
         SymbolMapGetter {
             inner: self.inner.clone(),
             manager,
-            channel,
         }
-    }
-
-    pub fn evict(&self, key: &cache::Key) {
-        self.inner.lock().unwrap().remove(key);
     }
 }
 
 impl SymbolMapGetter {
     pub fn get_symbol_maps<Extra>(
         self,
-        keys: Vec<(Extra, cache::Key)>,
+        keys: Vec<(Extra, Key)>,
     ) -> FuturesUnordered<
         impl std::future::Future<Output = (Extra, Result<Option<LoadedSymbolMap>, SymbolMapError>)>,
     > {
@@ -79,7 +69,7 @@ impl SymbolMapGetter {
             .collect()
     }
 
-    fn get(&self, key: cache::Key) -> Shared<LoadSymbolMap> {
+    fn get(&self, key: Key) -> Shared<LoadSymbolMap> {
         self.inner
             .lock()
             .unwrap()
@@ -88,7 +78,6 @@ impl SymbolMapGetter {
                 let manager = self.manager.clone();
                 let location = Location {
                     key: key.clone(),
-                    channel: self.channel,
                     symindex: false,
                 };
                 LoadSymbolMap {

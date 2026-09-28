@@ -5,7 +5,10 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1"
+async-trait = "0.1"
+cab = "0.6"
 debugid = { version = "0.8", features = ["serde"] }
+download-cache = { path = "../download-cache" }
 futures-util = "0.3"
 log = "0.4"
 memmap2 = "0.9"

@@ -69,10 +69,11 @@ impl SymbolicateStacks {
         status.pings.inc_complete();
         Ok(input)
     }
+}
 
-    pub async fn maintenance(&self) {
-        self.symbolicator.maintenance().await
-    }
+pub async fn clean_cache(config: &Config, limit: u64) -> std::io::Result<()> {
+    let cache = download_cache::fs::OfflineFsCache::new(config.cache.directory.clone());
+    cache.evict(limit).await
 }
 
 #[derive(Debug, serde::Deserialize)]

@@ -1,13 +1,11 @@
 use anyhow::Context;
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser};
 use lib::{Config, SymbolicateStacks, config::WorkerThreads};
 use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::Arc,
 };
-
-mod server;
 
 const DEFAULT_CONFIG_FILE: &str = "config.toml";
 
@@ -23,25 +21,15 @@ fn existing_path(s: &str) -> std::io::Result<PathBuf> {
     }
 }
 
-/// The operating mode of the program.
-#[derive(Debug, Subcommand)]
-enum Command {
-    /// Start a server with which clients will communicate.
-    ///
-    /// The server does not daemonize.
-    Server(LaunchArgs),
-    /// Symbolicate stack traces using a running server.
-    Client(SymbolicationArgs),
-    /// Send control messages to a running server.
-    #[command(subcommand)]
-    Control(ControlCommand),
-    /// Run symbolication as one-shot processing without using a server.
-    Standalone {
-        #[command(flatten)]
-        launch_args: LaunchArgs,
-        #[command(flatten)]
-        symbolication_args: SymbolicationArgs,
-    },
+fn byte_size(s: &str) -> Result<u64, std::num::ParseIntError> {
+    const SUFFIXES: [(&str, u32); 4] = [("k", 3), ("M", 6), ("G", 9), ("T", 12)];
+    for (suffix, pow) in SUFFIXES {
+        if let Some(n) = s.strip_suffix(suffix) {
+            return Ok(n.parse::<u64>()? * 10u64.pow(pow));
+        }
+    }
+
+    s.parse::<u64>()
 }
 
 #[derive(Debug, Args)]
@@ -62,41 +50,41 @@ impl LaunchArgs {
 #[derive(Debug, Args)]
 struct SymbolicationArgs {
     /// The path from which to read input. If unspecified, input is read from stdin.
-    #[arg(short, long)]
+    #[arg(short, long, conflicts_with = "clean_cache")]
     input_file: Option<PathBuf>,
 
     /// The path to which to write the output. If unspecified, output is written to stdout.
-    #[arg(short, long)]
+    #[arg(short, long, conflicts_with = "clean_cache")]
     output_file: Option<PathBuf>,
-}
-
-#[derive(Debug, Subcommand)]
-enum ControlCommand {
-    /// Ping a running server.
-    ///
-    /// Exits with a 0 code if the server responded, otherwise 1.
-    Ping,
-    /// Shutdown a running server.
-    Stop,
 }
 
 /// Symbolicate StackTraces from crash annotations, and output a format compatible with signature
 /// generation.
 #[derive(Debug, Parser)]
 struct Cli {
-    #[command(subcommand)]
-    command: Command,
+    #[command(flatten)]
+    launch_args: LaunchArgs,
+
+    /// Only clean the cache, evicting entries in order of least recent modification until below the
+    /// given size threshold.
+    ///
+    /// The given value can optionally have one of the following suffixes: k, M, G, T. Without a
+    /// value, the limit is read from the config file.
+    #[arg(long, value_name = "BYTES", value_parser = byte_size)]
+    clean_cache: Option<Option<u64>>,
+
+    #[command(flatten)]
+    symbolication_args: SymbolicationArgs,
 }
 
-fn run_with_symbolicator<F: AsyncFnOnce(&Arc<SymbolicateStacks>)>(
-    config_file: &Path,
-    f: F,
-) -> anyhow::Result<()> {
-    let config: Config = std::fs::read_to_string(&config_file)
+fn read_config_file(path: &Path) -> anyhow::Result<Config> {
+    std::fs::read_to_string(path)
         .map_err(|e| anyhow::Error::from(e))
         .and_then(|s| Ok(toml::from_str(&s)?))
-        .with_context(|| format!("while reading {}", config_file.display()))?;
+        .with_context(|| format!("while reading {}", path.display()))
+}
 
+fn tokio_runtime(config: &Config) -> std::io::Result<tokio::runtime::Runtime> {
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.enable_all().thread_name("symbolicate-stacks");
 
@@ -104,26 +92,19 @@ fn run_with_symbolicator<F: AsyncFnOnce(&Arc<SymbolicateStacks>)>(
         builder.worker_threads(n);
     }
 
+    builder.build()
+}
+
+fn run_with_symbolicator<F: AsyncFnOnce(&Arc<SymbolicateStacks>)>(
+    config_file: &Path,
+    f: F,
+) -> anyhow::Result<()> {
+    let config: Config = read_config_file(config_file)?;
+    let runtime = tokio_runtime(&config)?;
     let symbolicator = Arc::new(SymbolicateStacks::new(config)?);
 
-    builder.build()?.block_on(async move {
-        let maintenance_task = {
-            let symbolicator = symbolicator.clone();
-            tokio::spawn(async move { symbolicator.maintenance().await })
-        };
-
+    runtime.block_on(async move {
         f(&symbolicator).await;
-
-        maintenance_task.abort();
-
-        // TODO Wait for any pending tasks to complete (otherwise they will be dropped in whatever
-        // intermediate state they were in).
-        /*
-        let handle = tokio::runtime::Handle::current();
-        while handle.metrics().num_alive_tasks() > 0 {
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        */
     });
 
     Ok(())
@@ -137,101 +118,50 @@ fn main() {
 
     let cli = Cli::parse();
 
-    match cli.command {
-        Command::Server(args) => {
-            if let Some(pid) = server::exists() {
-                log::error!(
-                    "only one server can run at a time (pid {} already running)",
-                    pid
-                );
-                std::process::exit(2);
-            }
+    let Cli {
+        launch_args,
+        clean_cache,
+        symbolication_args,
+    } = cli;
 
-            if let Err(e) = server::acquire_pid_lock() {
-                log::error!("{e:#}");
-                std::process::exit(2);
-            }
-
-            if let Err(e) = run_with_symbolicator(args.config_file(), server::run) {
-                log::error!("failed to start server: {e:#}");
-                std::process::exit(1);
-            }
-        }
-        Command::Client(args) => {
-            let mut input = args
-                .input_file
-                .map(|path| std::fs::File::open(path).map(|s| Box::new(s) as Box<dyn Read>))
-                .unwrap_or_else(|| Ok(Box::new(std::io::stdin()) as Box<dyn Read>))
-                .expect("failed to open input stream");
-
-            let mut output = args
-                .output_file
-                .map(|path| std::fs::File::create(path).map(|f| Box::new(f) as Box<dyn Write>))
-                .unwrap_or_else(|| Ok(Box::new(std::io::stdout())))
-                .expect("failed to open output stream");
-
-            let mut conn = server::connect().expect("failed to connect to server");
-
-            std::io::copy(&mut input, &mut conn).expect("failed to write input to server");
-            conn.write_all(&[0])
-                .expect("failed to write input to server");
-
-            let mut status = [0u8; 1];
-            conn.read_exact(&mut status)
-                .expect("failed to read from server");
-
-            match status[0] {
-                b'o' => std::io::copy(&mut conn, &mut output).expect("failed to read from server"),
-                b'e' => {
-                    std::io::copy(&mut conn, &mut std::io::stderr())
-                        .expect("failed to read from server");
-                    std::process::exit(1);
-                }
-                _ => unreachable!(),
-            };
-        }
-        Command::Control(ControlCommand::Ping) => {
-            if let Err(e) = server::ping() {
-                log::error!("failed to ping server: {e}");
-                std::process::exit(1);
-            }
-        }
-        Command::Control(ControlCommand::Stop) => {
-            if let Err(e) = server::close() {
-                log::error!("failed to connect to server: {e}");
-                std::process::exit(1);
-            }
-        }
-        Command::Standalone {
-            launch_args,
-            symbolication_args,
-        } => {
-            let input = symbolication_args
-                .input_file
-                .map(|path| std::fs::read_to_string(path))
-                .unwrap_or_else(|| {
-                    let mut s = String::new();
-                    std::io::stdin().read_to_string(&mut s)?;
-                    Ok(s)
-                })
-                .expect("failed to read input");
-
-            let mut output = symbolication_args
-                .output_file
-                .map(|path| std::fs::File::create(path).map(|f| Box::new(f) as Box<dyn Write>))
-                .unwrap_or_else(|| Ok(Box::new(std::io::stdout())))
-                .expect("failed to open output stream");
-
-            run_with_symbolicator(launch_args.config_file(), async move |symbolicator| {
-                match symbolicator.symbolicate(input).await {
-                    Ok(s) => write!(output, "{}", s).expect("failed to write output"),
-                    Err(e) => {
-                        write!(std::io::stderr(), "{}", e).expect("failed to write to stderr");
-                        std::process::exit(1);
-                    }
-                }
-            })
-            .expect("failed to start symbolicator");
-        }
+    if let Some(limit) = clean_cache {
+        let config =
+            read_config_file(launch_args.config_file()).expect("failed to read config file");
+        let runtime = tokio_runtime(&config).expect("failed to create runtime");
+        let limit = limit
+            .or(config.cache.fs_size_limit_gb.limit_bytes())
+            .expect("no cache limit set");
+        runtime
+            .block_on(lib::clean_cache(&config, limit))
+            .expect("failed to clean cache");
+        std::process::exit(0);
     }
+
+    let input = symbolication_args
+        .input_file
+        .map(|path| std::fs::read_to_string(path))
+        .unwrap_or_else(|| {
+            let mut s = String::new();
+            std::io::stdin().read_to_string(&mut s)?;
+            Ok(s)
+        })
+        .expect("failed to read input");
+
+    let mut output = symbolication_args
+        .output_file
+        .map(|path| std::fs::File::create(path).map(|f| Box::new(f) as Box<dyn Write>))
+        .unwrap_or_else(|| Ok(Box::new(std::io::stdout())))
+        .expect("failed to open output stream");
+
+    run_with_symbolicator(
+        launch_args.config_file(),
+        async move |symbolicator| match symbolicator.symbolicate(input).await {
+            Ok(s) => write!(output, "{}", s).expect("failed to write output"),
+            Err(e) => {
+                write!(std::io::stderr(), "{}", e).expect("failed to write to stderr");
+                std::process::exit(1);
+            }
+        },
+    )
+    .expect("failed to start symbolicator");
 }

@@ -5,93 +5,33 @@ within. It provides records compatible with the [siggen schema][] so that they m
 into siggen to create a signature.
 
 The program downloads symbol files to perform symbolication if they are missing, and caches them for
-future use. It runs as a server-client model, spawning a server as necessary. The server allows
-efficient management of the cache, and keeps symbol files loaded so that unnecessary repeated
-parsing and loading can be skipped.
+future use.
 
-## Modes
+## Usage
 
-The symbolicate-stacks program supports a few different modes of operation (keyed through
-command-line subcommands).
+`symbolicate-stacks` accepts the following arguments:
 
-### `server`
+### `--config-file <FILE>`
 
-The `server` subcommand will start a symbolication server, using unix sockets for communication. The
-socket and pid file of the server will be created under `$RUNTIME_DIR/symbolicate-stacks.sock` and
-`$RUNTIME_DIR/symbolicate-stacks.pid`, where `RUNTIME_DIR` is `XDG_RUNTIME_DIR`, if set, otherwise
-the temp directory.
+Specify the config file to use. Defaults to `config.toml`.
 
-Once running, the server will accept new socket connections and supports the following commands:
+### `--input-file <FILE>`
 
-- `ping`: the server will respond with `pong` and close the connection.
-- `close`: the server will shutdown.
-- a JSON crash annotations string.
+Specify the input file from which to read. Defaults to stdin.
 
-Commands should be followed by a nul (0) byte to indicate end of data if a response is expected
-(`ping` and crash annotations processing).
+### `--output-file <FILE>`
 
-When a crash annotation string is received, symbolication of the `StackTraces` annotation then
-commences. Upon success, an `o` byte (for "output") is written to the connection, followed by the
-JSON response. Upon failure, an `e` byte is written (for "error") and an error message follows.
+Specify the output file to which to write. Defaults to stdout.
 
-#### Exit codes
+### `--clean-cache [<BYTES>]`
 
-Upon error, details will be logged.
+Clean the cache, evicting entries to reduce usage to the given maximum size. If `<BYTES>` is
+omitted, the size is read from the config file. On the command-line, the size may be suffixed by
+`k`, `M`, `G`, or `T` to multiply the value.
 
-- `0`: successful exit (indicating a clean shutdown)
-- `1`: the server failed to start
-- `2`: the server failed to start due to another server running or failure to acquire the PID file
-  lock
+## Exit codes
 
-#### Shutdown
-
-If the server receives a `close` command, or receives a SIGINT, SIGTERM, or SIGHUP, it will exit the
-main loop and shutdown.
-
-### `client`
-
-The `client` subcommand connects to a running server (started with the `server` command), reads
-symbolication input from a file (`--input-file`, or stdin), sends it to the server, and prints the
-result to `--output-file` or stdout (in case of success), or an error message to stderr.
-
-#### Exit codes
-
-- `0`: successful symbolication
-- `1`: failed symbolication (printing the error from the server to stderr)
-- `101`: fatal client error (printing panic details)
-
-### `control`
-
-The `control` subcommand sends control messages to a running server. It supports the following
-messages (as subcommands):
-
-#### `ping`
-
-Send a ping to the server.
-
-##### Exit codes
-
-- `0`: successful ping and response
-- `1`: error occurred (logged to stderr)
-
-#### `stop`
-
-Stop a running server.
-
-##### Exit codes
-
-- `0`: successfully sent the `close` command
-- `1`: error occurred (logged to stderr)
-
-### `standalone`
-
-The `standalone` subcommand runs one-shot symbolication without using a server. It accepts
-`--config-file`, `--input-file`, and `--output-file` as the `server` and `client` subcommands do,
-and behaves similarly.
-
-#### Exit codes
-
-- `0`: successful symbolication
+- `0`: successful symbolication or cache cleanup
 - `1`: failed symbolication (printing the error to stderr)
 - `101`: fatal client error (printing panic details)
 
@@ -102,9 +42,8 @@ to choose the log level and filtering (see the [env_logger docs][]).
 
 ## Configuration
 
-Symbolication is configured with a TOML file, through the `--config-file` command-line argument to
-the `server` or `standalone` subcommands. If unspecified, `config.toml` is used. A config file must
-be present.
+Symbolication is configured with a TOML file, through the `--config-file` command-line argument. If
+unspecified, `config.toml` is used. A config file must be present.
 
 See [example/config.toml](example/config.toml) for a commented file showing all configuration options.
 
