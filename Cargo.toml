@@ -1,5 +1,5 @@
 [workspace]
-members = ["lib/"]
+members = ["download-cache","lib"]
 resolver = "3"
 
 [package]
