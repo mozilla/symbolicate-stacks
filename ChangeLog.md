@@ -1,10 +1,8 @@
 ## [Unreleased]
 - Reorganize example code into a subdirectory.
-- Change the operating paradigm to explicitly launch the server.
-- Add a standalone execution mode.
-- Change the CLI to take subcommands to determine behavior.
-- Add a `ping` command to check server comms health.
-- Improve shutdown to wait for pending tasks.
+- Change to a standalone execution mode.
+- Change caching to a purely fs-based approach to simplify concurrent access of multiple standalone
+  programs.
 
 ## [0.1.0] - 2026-09-02
 - Initial release.
