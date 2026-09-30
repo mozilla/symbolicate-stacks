@@ -593,54 +593,6 @@ impl FileHelper {
         })
     }
 
-    /*
-    fn evict(&self, key: &Key) {
-        let entry = self.loaded_files.lock().unwrap().remove(key);
-        if let Some(loaded) = entry {
-            drop(loaded);
-            let paths = [
-                self.cache_dir
-                    .join("breakpad")
-                    .join(key.breakpad_relative_path()),
-                self.cache_dir
-                    .join("breakpad")
-                    .join(key.breakpad_symindex_relative_path()),
-                self.cache_dir
-                    .join("windows")
-                    .join(key.symsrv_relative_path()),
-            ];
-            for path in paths {
-                let _ = std::fs::remove_file(path);
-            }
-        }
-    }
-    */
-
-    /*
-    fn get_mapped(&self, key: &Key) -> Option<Arc<memmap2::Mmap>> {
-        let mut guard = self.loaded_files.lock().unwrap();
-        let loaded = guard.get_mut(key)?;
-        if loaded.mapped.is_none() {
-            let f = std::fs::File::open(
-                self.cache_dir
-                    .join("breakpad")
-                    .join(key.breakpad_relative_path()),
-            )
-            .ok()
-            .or_else(|| {
-                std::fs::File::open(
-                    self.cache_dir
-                        .join("windows")
-                        .join(key.symsrv_relative_path()),
-                )
-                .ok()
-            })?;
-            loaded.mapped = Some(Arc::new(unsafe { memmap2::Mmap::map(&f) }.ok()?));
-        }
-        loaded.mapped.clone()
-    }
-    */
-
     fn get_breakpad_symindex_mapped(&self, key: &Key) -> Option<Arc<memmap2::Mmap>> {
         let mut guard = self.loaded_files.lock().unwrap();
         let loaded = guard.get_mut(key)?;
@@ -715,32 +667,6 @@ impl FileHelper {
                     }
                 }
             };
-
-            /*
-            let mut errors = AggregateError::new();
-
-            match self.load_breakpad_file(&location.key).await {
-                Ok(Some(loaded)) => break 'result loaded,
-                Ok(None) => (),
-                Err(e) => errors
-                    .push(e.context(format!("failed to get breakpad file for {location}"))),
-            }
-
-            match self.load_symsrv_file(&location.key).await {
-                Ok(Some(loaded)) => break 'result loaded,
-                Ok(None) => (),
-                Err(e) => errors
-                    .push(e.context(format!("failed to get symsrv file for {location}"))),
-            }
-
-            // Important: `into_result` will not create an `anyhow::Error` out of the
-            // `NotFoundError` here, as there's a bug where an `anyhow::Error` converted to
-            // a `Box<std::error::Error>` can't be downcast (see
-            // https://github.com/dtolnay/anyhow/issues/379). We check for `NotFoundError`
-            // by downcasting, and this function has to return a `Box<std::error::Error>`,
-            // so this is a bit fragile.
-            return errors.into_result(Err(NotFoundError(location).into()));
-            */
 
             let prev = self
                 .loaded_files
