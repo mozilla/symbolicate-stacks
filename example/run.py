@@ -106,11 +106,9 @@ class PingProcessor:
         return generate_result.signature, output
 
     def __init__(self, concurrent_count: typing.Optional[int] = None):
-        # symbolicate-stacks will manage its concurrency well, so we want to
-        # make sure it is has a good supply of work to do. It's better for work
-        # to be queued in symbolicate-stacks than for latency to be introduced
-        # by queueing in python.
-        max_workers = concurrent_count or os.process_cpu_count() * 2
+        # symbolicate-stacks has some concurrency as well, so we want to make
+        # sure we don't unnecessarily overwhelm with threads.
+        max_workers = concurrent_count or os.process_cpu_count() / 4
         self._executor = InterpreterPoolExecutor(max_workers = max_workers, initializer = PingProcessor._pool_initializer)
 
     def __enter__(self):
@@ -229,17 +227,6 @@ def filter_errors(logger: logging.Logger, results: typing.Iterable[tuple[str, st
             logger.error(f"error processing {doc_id}: {result}")
 
 
-@contextmanager
-def symbolicate_stacks_server():
-    def runserver(arg: str):
-        subprocess.run([SYMBOLICATE_STACKS, "--server", arg]).check_returncode()
-    runserver("start")
-    try:
-        yield
-    finally:
-        runserver("stop")
-
-
 if __name__ == "__main__":
     import argparse
     import time
@@ -258,7 +245,7 @@ if __name__ == "__main__":
     total_rows = 0
     success_rows = 0
     bq = BQ(task_id, PROJECT if args.production else STAGE_PROJECT)
-    with symbolicate_stacks_server(), PingProcessor() as processor:
+    with PingProcessor() as processor:
         while True:
             logger.info("querying ping data")
             avail_count, pings = bq.download()
