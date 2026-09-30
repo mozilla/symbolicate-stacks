@@ -720,15 +720,21 @@ mod test {
         TestCache::new(|d| OfflineFsCache::new(d.to_owned())).await
     }
 
-    async fn test_cache() -> (TestCache<FsCache>, mockito::ServerGuard) {
-        let server = mockito::Server::new_async().await;
+    fn cache_using_server(dir: &Path, server: &mockito::ServerGuard) -> FsCache {
         let client = reqwest::Client::builder()
             .proxy(reqwest::Proxy::all(server.url()).unwrap())
-            //.resolve("test", server.socket_address())
             .build()
             .unwrap();
-        let cache = TestCache::new(move |d| FsCache::new(d.to_owned(), client)).await;
+        FsCache::new(dir.to_owned(), client)
+    }
 
+    async fn test_cache_from_server(server: &mockito::ServerGuard) -> TestCache<FsCache> {
+        TestCache::new(|d| cache_using_server(d, server)).await
+    }
+
+    async fn test_cache() -> (TestCache<FsCache>, mockito::ServerGuard) {
+        let server = mockito::Server::new_async().await;
+        let cache = test_cache_from_server(&server).await;
         (cache, server)
     }
 
@@ -974,5 +980,73 @@ mod test {
             b"world"
         );
         m.assert_async().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cache_concurrent_get() {
+        // Add a delay in `transform` to make it very likely that tasks don't see other successes
+        // and download/store concurrently.
+        struct Delay;
+        #[async_trait::async_trait]
+        impl Transform for Delay {
+            async fn transform(
+                &mut self,
+                response: reqwest::Response,
+                target: &mut TargetFiles,
+            ) -> std::io::Result<()> {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                if let Err(e) = copy_response(response, target.primary()).await {
+                    return Err(match e {
+                        GetError::IO(e) => e,
+                        GetError::Reqwest(r) => std::io::Error::other(r),
+                    });
+                }
+                Ok(())
+            }
+        }
+
+        const CONCURRENT_COUNT: usize = 50;
+        const FILE_COUNT: usize = 4;
+
+        assert!(FILE_COUNT <= CONCURRENT_COUNT);
+
+        let (cache, mut server) = test_cache().await;
+
+        let mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_body_from_request(|request| request.path().as_bytes().to_vec())
+            .expect_at_least(FILE_COUNT)
+            .create_async()
+            .await;
+
+        let mut tasks = tokio::task::JoinSet::new();
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(CONCURRENT_COUNT));
+        for i in 0..CONCURRENT_COUNT {
+            let cache = cache_using_server(cache.dir(), &server);
+            let file = format!("file{}", i % FILE_COUNT);
+            let url = format!("http://test/{file}");
+            let barrier = barrier.clone();
+            tasks.spawn(async move {
+                barrier.wait().await;
+                cache
+                    .get(&Key(&file), vec![Url::new(url).with_transform(Delay)])
+                    .await
+                    .expect("failed to fetch file")
+                    .expect("failed to get contents");
+            });
+        }
+
+        tasks.join_all().await;
+        mock.assert_async().await;
+
+        for i in 0..FILE_COUNT {
+            let contents = cache
+                .get_offline(&Key(&format!("file{i}")))
+                .expect("file missing");
+            assert_eq!(
+                tokio::fs::read(contents.primary()).await.unwrap(),
+                format!("/file{i}").as_bytes()
+            );
+        }
     }
 }
