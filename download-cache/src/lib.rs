@@ -8,8 +8,3 @@ pub mod fs;
 // `http` is public so that some of the utilities can be used outside of this crate for the existing
 // cache implementation. It will eventually be replaced by an implementation in this crate.
 pub mod http;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-}

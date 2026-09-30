@@ -220,29 +220,10 @@ impl OfflineFsCache {
 
     /// Mark the given cache key as used at this point in time.
     pub fn used(&self, key: &impl CacheKey) {
-        use std::fs::{File, FileTimes, read_dir};
-
-        fn set_file_times(path: &Path, time: SystemTime) {
-            match File::open(path) {
-                Ok(f) => {
-                    let times = FileTimes::new().set_accessed(time).set_modified(time);
-                    if let Err(e) = f.set_times(times) {
-                        log::error!("failed to update file times for {}: {e}", path.display());
-                    }
-                }
-                Err(e) => {
-                    log::error!(
-                        "failed to open file to update file times for {}: {e}",
-                        path.display()
-                    );
-                }
-            }
-        }
-
-        tokio::task::block_in_place(|| {
+        block_in_place(|| {
             let now = SystemTime::now();
             let dir = self.key_to_path(key);
-            let read_dir = match read_dir(&dir) {
+            let read_dir = match std::fs::read_dir(&dir) {
                 Err(e) => {
                     log::error!("failed to read dir {}: {e}", dir.display());
                     return;
@@ -464,6 +445,35 @@ async fn enumerate_cache_entries(dir: &Path) -> Vec<(PathBuf, Option<SystemTime>
         .collect()
 }
 
+fn block_in_place<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    match tokio::runtime::Handle::current().runtime_flavor() {
+        tokio::runtime::RuntimeFlavor::MultiThread => tokio::task::block_in_place(f),
+        _ => f(),
+    }
+}
+
+/// Set file modification and access times to the given time.
+fn set_file_times(path: &Path, time: SystemTime) {
+    use std::fs::{File, FileTimes};
+    match File::open(path) {
+        Ok(f) => {
+            let times = FileTimes::new().set_accessed(time).set_modified(time);
+            if let Err(e) = f.set_times(times) {
+                log::error!("failed to update file times for {}: {e}", path.display());
+            }
+        }
+        Err(e) => {
+            log::error!(
+                "failed to open file to update file times for {}: {e}",
+                path.display()
+            );
+        }
+    }
+}
+
 /// Get all files with modification time and size in the given directory, recursively.
 ///
 /// This will ignore subdirectories named the same as the temporary directory used by `FsCache`.
@@ -525,7 +535,10 @@ struct TempFile {
 
 impl TempFile {
     fn new_in(dir: &Path) -> std::io::Result<Self> {
-        let tempfile = tokio::task::block_in_place(|| NamedTempFile::new_in(dir))?;
+        let tempfile = block_in_place(|| {
+            std::fs::create_dir_all(dir)?;
+            NamedTempFile::new_in(dir)
+        })?;
         let (file, tempfile) = tempfile.into_parts();
         Ok(Self {
             inner: NamedTempFile::from_parts(File::from_std(file), tempfile),
@@ -536,7 +549,7 @@ impl TempFile {
         self,
         new_path: impl AsRef<Path>,
     ) -> Result<File, tempfile::PersistError<File>> {
-        tokio::task::block_in_place(move || self.inner.persist_noclobber(new_path))
+        block_in_place(move || self.inner.persist_noclobber(new_path))
     }
 }
 
@@ -569,4 +582,397 @@ pub enum GetError {
     Reqwest(#[from] reqwest::Error),
     #[error("io error: {0}")]
     IO(#[from] std::io::Error),
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    struct Key<'a>(&'a str);
+
+    impl CacheKey for Key<'_> {
+        fn cache_key(&self) -> PathBuf {
+            Path::new(self.0).to_owned()
+        }
+    }
+
+    async fn make_fs(dir: &Path, entries: Vec<(&str, Option<(&str, SystemTime)>)>) {
+        use tokio::fs::{create_dir_all, write};
+
+        for (path, file) in entries {
+            let path = dir.join(path);
+            if let Some((content, time)) = file {
+                create_dir_all(path.parent().unwrap()).await.unwrap();
+                write(&path, content.as_bytes()).await.unwrap();
+                set_file_times(&path, time);
+            } else {
+                create_dir_all(path).await.unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn get_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path();
+
+        let time = SystemTime::now();
+        let time2 = time + std::time::Duration::from_secs(2);
+        make_fs(
+            dir,
+            vec![
+                ("a/b/f1", Some(("f1", time))),
+                ("a/b/f2", Some(("f2foo", time))),
+                ("c/f3", Some(("f3", time2))),
+                ("f4", Some(("f4", time2))),
+                (".tmp/f5", Some(("f5", time))),
+            ],
+        )
+        .await;
+
+        let mut result = super::get_files(dir).await;
+        result.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            result,
+            vec![
+                (dir.join("a/b/f1"), Some(time), 2),
+                (dir.join("a/b/f2"), Some(time), 5),
+                (dir.join("c/f3"), Some(time2), 2),
+                (dir.join("f4"), Some(time2), 2),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn enumerate_cache_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path();
+
+        let time = SystemTime::now();
+        let time2 = time + std::time::Duration::from_secs(2);
+        make_fs(
+            dir,
+            vec![
+                ("a/b/_primary", Some(("ab", time))),
+                ("a/b/alt1", Some(("alt1content", time2))),
+                ("a/b/alt2", Some(("alt2morecontent", time2))),
+                ("c/d/_primary", Some(("cd", time2))),
+                ("e/_primary", Some(("e", time2))),
+                ("f/somefile", Some(("somefile", time2))),
+                (".tmp/other", Some(("tmp", time))),
+            ],
+        )
+        .await;
+
+        let mut result = super::enumerate_cache_entries(dir).await;
+        result.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            result,
+            vec![
+                (dir.join("a/b"), Some(time), 28),
+                (dir.join("c/d"), Some(time2), 2),
+                (dir.join("e"), Some(time2), 1),
+            ]
+        );
+    }
+
+    struct TestCache<C> {
+        #[allow(unused)]
+        dir: tempfile::TempDir,
+        cache: C,
+    }
+
+    impl<C> TestCache<C> {
+        async fn new<F: FnOnce(&Path) -> C>(f: F) -> Self {
+            let dir = tempfile::tempdir().unwrap();
+
+            let time = SystemTime::now();
+            let time2 = time + std::time::Duration::from_secs(2);
+            let time3 = time + std::time::Duration::from_secs(8);
+            make_fs(
+                dir.path(),
+                vec![
+                    ("a/b/_primary", Some(("ab", time))),
+                    ("a/b/alt1", Some(("alt1content", time))),
+                    ("a/b/alt2", Some(("alt2morecontent", time))),
+                    ("a/q/_primary", Some(("aq", time2))),
+                    ("c/d/_primary", Some(("cd", time2))),
+                    ("e/_primary", Some(("e", time3))),
+                ],
+            )
+            .await;
+
+            let cache = f(dir.path());
+
+            Self { dir, cache }
+        }
+    }
+
+    impl<C> std::ops::Deref for TestCache<C> {
+        type Target = C;
+
+        fn deref(&self) -> &Self::Target {
+            &self.cache
+        }
+    }
+
+    async fn test_offline_cache() -> TestCache<OfflineFsCache> {
+        TestCache::new(|d| OfflineFsCache::new(d.to_owned())).await
+    }
+
+    async fn test_cache() -> (TestCache<FsCache>, mockito::ServerGuard) {
+        let server = mockito::Server::new_async().await;
+        let client = reqwest::Client::builder()
+            .proxy(reqwest::Proxy::all(server.url()).unwrap())
+            //.resolve("test", server.socket_address())
+            .build()
+            .unwrap();
+        let cache = TestCache::new(move |d| FsCache::new(d.to_owned(), client)).await;
+
+        (cache, server)
+    }
+
+    /// Test `OfflineFsCache::contains()`.
+    #[tokio::test]
+    async fn offline_cache_contains() {
+        let cache = test_offline_cache().await;
+        assert!(cache.contains(&Key("a/b")));
+        assert!(cache.contains(&Key("a/q")));
+        assert!(cache.contains(&Key("c/d")));
+        assert!(cache.contains(&Key("e")));
+        assert!(!cache.contains(&Key("f")));
+    }
+
+    /// Test `OfflineFsCache::get_offline()`.
+    #[tokio::test]
+    async fn offline_cache_get() {
+        let cache = test_offline_cache().await;
+
+        let ab = cache.get_offline(&Key("a/b")).expect("missing a/b key");
+        let cd = cache.get_offline(&Key("c/d")).expect("missing c/d key");
+        assert_eq!(ab.primary(), cache.dir().join("a/b/_primary"));
+        assert_eq!(ab.associated("alt1"), cache.dir().join("a/b/alt1"));
+        assert_eq!(ab.associated("alt2"), cache.dir().join("a/b/alt2"));
+        assert_eq!(cd.primary(), cache.dir().join("c/d/_primary"));
+
+        // Remove files externally
+        tokio::fs::remove_dir_all(cache.dir().join("a/b"))
+            .await
+            .unwrap();
+
+        assert!(cache.get_offline(&Key("a/b")).is_none())
+    }
+
+    /// Test `OfflineFsCache::remove()`.
+    #[tokio::test]
+    async fn offline_cache_remove() {
+        let cache = test_offline_cache().await;
+
+        cache.remove(&Key("a/b")).await.unwrap();
+        assert!(cache.get_offline(&Key("a/b")).is_none());
+        assert!(cache.dir().join("a").exists());
+
+        cache.remove(&Key("a/q")).await.unwrap();
+        assert!(!cache.dir().join("a").exists());
+    }
+
+    /// Test `OfflineFsCache::used()`.
+    #[tokio::test]
+    async fn offline_cache_used() {
+        let cache = test_offline_cache().await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let now = SystemTime::now();
+
+        cache.used(&Key("a/b"));
+
+        let meta = tokio::fs::metadata(cache.dir().join("a/b/_primary"))
+            .await
+            .unwrap();
+        assert!(meta.modified().unwrap() >= now);
+        assert!(meta.accessed().unwrap() >= now);
+    }
+
+    /// Test `OfflineFsCache::evict()`.
+    #[tokio::test]
+    async fn offline_cache_evict() {
+        let cache = test_offline_cache().await;
+        cache.evict(33).await.unwrap();
+        assert!(cache.contains(&Key("a/b")));
+        assert!(cache.contains(&Key("a/q")));
+        assert!(cache.contains(&Key("c/d")));
+        assert!(cache.contains(&Key("e")));
+
+        cache.evict(32).await.unwrap();
+        assert!(!cache.contains(&Key("a/b")));
+        assert!(cache.contains(&Key("a/q")));
+        assert!(cache.contains(&Key("c/d")));
+        assert!(cache.contains(&Key("e")));
+
+        cache.evict(5).await.unwrap();
+        assert!(cache.contains(&Key("a/q")));
+        assert!(cache.contains(&Key("c/d")));
+        assert!(cache.contains(&Key("e")));
+
+        cache.evict(4).await.unwrap();
+        assert!(cache.contains(&Key("a/q")) ^ cache.contains(&Key("c/d")));
+        assert!(cache.contains(&Key("e")));
+
+        cache.evict(3).await.unwrap();
+        assert!(cache.contains(&Key("a/q")) ^ cache.contains(&Key("c/d")));
+        assert!(cache.contains(&Key("e")));
+
+        cache.evict(2).await.unwrap();
+        assert!(!cache.contains(&Key("a/q")));
+        assert!(!cache.contains(&Key("c/d")));
+        assert!(cache.contains(&Key("e")));
+
+        cache.evict(1).await.unwrap();
+        assert!(cache.contains(&Key("e")));
+
+        cache.evict(0).await.unwrap();
+        assert!(!cache.contains(&Key("e")));
+    }
+
+    /// Test `FsCache::get()` with a file to download.
+    #[tokio::test]
+    async fn cache_get() {
+        let (cache, mut server) = test_cache().await;
+        let m = server
+            .mock("GET", "/file")
+            .with_body("contents")
+            .create_async()
+            .await;
+        let contents = cache
+            .get(&Key("file"), vec![Url::new("http://test/file".into())])
+            .await
+            .expect("failed to fetch file")
+            .expect("failed to get contents");
+        assert_eq!(contents.primary(), cache.dir().join("file/_primary"));
+        assert_eq!(
+            tokio::fs::read(contents.primary()).await.unwrap(),
+            b"contents"
+        );
+        m.assert_async().await;
+    }
+
+    /// Test `FsCache::get()` with an existing entry, ensuring no download occurs.
+    #[tokio::test]
+    async fn cache_get_existing() {
+        let (cache, mut server) = test_cache().await;
+        let m = server
+            .mock("GET", "/file")
+            .with_body("contents")
+            .expect(0)
+            .create_async()
+            .await;
+        let contents = cache
+            .get(&Key("a/b"), vec![Url::new("http://test/file".into())])
+            .await
+            .expect("failed to fetch file")
+            .expect("failed to get contents");
+        assert_eq!(contents.primary(), cache.dir().join("a/b/_primary"));
+        assert_eq!(tokio::fs::read(contents.primary()).await.unwrap(), b"ab");
+        m.assert_async().await;
+    }
+
+    /// Test `FsCache::get()` when there is no entry and a 404 from the server.
+    #[tokio::test]
+    async fn cache_get_missing() {
+        let (cache, _server) = test_cache().await;
+        let contents = cache
+            .get(&Key("file"), vec![Url::new("http://test/file".into())])
+            .await
+            .expect("failed to fetch file");
+        assert!(contents.is_none());
+    }
+
+    /// Test that `FsCache::get()` will attempt urls in order and move to the next upon failure.
+    #[tokio::test]
+    async fn cache_get_fallback() {
+        let (cache, mut server) = test_cache().await;
+        let file = server
+            .mock("GET", "/file")
+            .with_body("contents")
+            .expect(0)
+            .create_async()
+            .await;
+        let file2 = server
+            .mock("GET", "/file2")
+            .with_body("2")
+            .create_async()
+            .await;
+        let contents = cache
+            .get(
+                &Key("file"),
+                vec![
+                    Url::new("http://test/doesnotexist".into()),
+                    Url::new("http://test/doesnotexistagain".into()),
+                    Url::new("http://test/file2".into()),
+                    Url::new("http://test/file".into()),
+                    Url::new("http://test/doesnotexist3".into()),
+                ],
+            )
+            .await
+            .expect("failed to fetch file")
+            .expect("failed to get contents");
+        assert_eq!(contents.primary(), cache.dir().join("file/_primary"));
+        assert_eq!(tokio::fs::read(contents.primary()).await.unwrap(), b"2");
+        file.assert_async().await;
+        file2.assert_async().await;
+    }
+
+    /// Test `FsCache::get()` when a transform is provided.
+    ///
+    /// This also tests the associated files behavior.
+    #[tokio::test]
+    async fn cache_get_transform() {
+        struct TestTransform;
+
+        #[async_trait::async_trait]
+        impl Transform for TestTransform {
+            async fn transform(
+                &mut self,
+                response: reqwest::Response,
+                target: &mut TargetFiles,
+            ) -> std::io::Result<()> {
+                use tokio::io::AsyncWriteExt;
+                let r = response.headers().get("x-hello").unwrap();
+
+                let hello = target.associated("hello".into())?;
+                hello.write_all(r.as_bytes()).await?;
+
+                let body = response.bytes().await.map_err(std::io::Error::other)?;
+                let primary = target.primary();
+                primary.write_all(body.as_ref()).await?;
+                primary.write_all(b" and extra").await?;
+
+                Ok(())
+            }
+        }
+
+        let (cache, mut server) = test_cache().await;
+        let m = server
+            .mock("GET", "/file")
+            .with_body("contents")
+            .with_header("x-hello", "world")
+            .create_async()
+            .await;
+        let contents = cache
+            .get(
+                &Key("file"),
+                vec![Url::new("http://test/file".into()).with_transform(TestTransform)],
+            )
+            .await
+            .expect("failed to fetch file")
+            .expect("failed to get contents");
+        assert_eq!(
+            tokio::fs::read(contents.primary()).await.unwrap(),
+            b"contents and extra"
+        );
+        assert_eq!(
+            tokio::fs::read(contents.associated("hello")).await.unwrap(),
+            b"world"
+        );
+        m.assert_async().await;
+    }
 }
