@@ -39,15 +39,25 @@ pub fn create_input<'a>(
 pub struct Input<'a> {
     #[serde(flatten)]
     symbolicated: &'a Option<Symbolicated>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     java_exception: Option<JavaException<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     oom_allocation_size: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     ipc_channel_error: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     os: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     async_shutdown_timeout: Option<Cow<'a, str>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     hang: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     js_large_allocation_failure: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     abort_message: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     ipc_message_name: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     additional_minidumps: Option<&'a str>,
 }
 

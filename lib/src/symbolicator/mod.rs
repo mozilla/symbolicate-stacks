@@ -381,8 +381,11 @@ impl Frame {
 
 #[derive(Debug, serde::Serialize)]
 pub struct Symbolicated {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub crashing_thread: Option<usize>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub threads: Vec<ThreadInfo>,
 }
 
