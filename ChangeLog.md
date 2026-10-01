@@ -3,6 +3,7 @@
 - Change to a standalone execution mode.
 - Change caching to a purely fs-based approach to simplify concurrent access of multiple standalone
   programs.
+- Forward report-only annotations that are relevant for siggen.
 
 ## [0.1.0] - 2026-09-02
 - Initial release.

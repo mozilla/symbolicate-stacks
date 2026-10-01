@@ -29,10 +29,12 @@ pub fn create_input<'a>(
             .map(fixup_async_shutdown_timeout),
         hang: annotations.hang.as_deref(),
         js_large_allocation_failure: annotations.js_large_allocation_failure.as_deref(),
+        abort_message: annotations.abort_message.as_deref(),
+        ipc_message_name: annotations.ipc_message_name.as_deref(),
+        additional_minidumps: annotations.additional_minidumps.as_deref(),
     }
 }
 
-// TODO abort_message (should be ping-scope rather than report-scope?)
 #[derive(Debug, serde::Serialize)]
 pub struct Input<'a> {
     #[serde(flatten)]
@@ -44,6 +46,9 @@ pub struct Input<'a> {
     async_shutdown_timeout: Option<Cow<'a, str>>,
     hang: Option<&'a str>,
     js_large_allocation_failure: Option<&'a str>,
+    abort_message: Option<&'a str>,
+    ipc_message_name: Option<&'a str>,
+    additional_minidumps: Option<&'a str>,
 }
 
 // AsyncShutdownTimeout has the `conditions` value serialized as a string, but it should be an

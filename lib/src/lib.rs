@@ -97,4 +97,9 @@ pub struct Annotations {
     pub hang: Option<String>,
     #[serde(alias = "JSLargeAllocationFailure")]
     pub js_large_allocation_failure: Option<String>,
+    #[serde(alias = "AbortMessage")]
+    pub abort_message: Option<String>,
+    #[serde(alias = "IPCMessageName")]
+    pub ipc_message_name: Option<String>,
+    pub additional_minidumps: Option<String>,
 }

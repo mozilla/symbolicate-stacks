@@ -35,6 +35,19 @@ omitted, the size is read from the config file. On the command-line, the size ma
 - `1`: failed symbolication (printing the error to stderr)
 - `101`: fatal client error (printing panic details)
 
+## Input
+
+The input is a JSON document containing crash annotations (in the same format as is used for
+annotations stored alongside crashes in Firefox). Additionally, the input annotation keys may
+arbitrarily be either snake_case or CamelCase (the former is a bit more conventional to use in,
+e.g., SQL queries).
+
+## Output
+
+The output is a JSON document compatible with the [siggen schema][]. It contains as much information
+as possible from the input annotations (i.e., the program supports reading the annotations necessary
+to populate the fields for siggen).
+
 ## Logging
 
 Logs are sent to stderr. The log level can be changed by setting the `RUST_LOG` environment variable
