@@ -45,7 +45,6 @@ impl Symbolicator {
     pub fn symbolicate(
         &self,
         stack_traces_json: String,
-        _channel: &str,
     ) -> impl std::future::Future<Output = anyhow::Result<Symbolicated>> {
         let symbol_map_getter = self.symbol_maps.getter(self.symbol_manager.clone());
 

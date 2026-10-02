@@ -44,10 +44,7 @@ impl SymbolicateStacks {
         let symbolicated_frames = input.stack_traces.take().and_then(|stack_traces| {
             // Rather than adding an `Option` to the already complex
             // `symbolicate` method, just check for a "null" value here.
-            (stack_traces != "null").then(|| {
-                self.symbolicator
-                    .symbolicate(stack_traces, input.channel.as_deref().unwrap_or("unknown"))
-            })
+            (stack_traces != "null").then(|| self.symbolicator.symbolicate(stack_traces))
         });
         if symbolicated_frames.is_some() {
             // Increment the status here to better represent the work to be
@@ -82,15 +79,11 @@ pub struct Annotations {
     pub stack_traces: Option<String>,
     #[serde(alias = "JavaException")]
     pub java_exception: Option<String>,
-    #[serde(alias = "MozCrashReason")]
-    pub moz_crash_reason: Option<String>,
     pub ipc_channel_error: Option<String>,
     #[serde(alias = "OOMAllocationSize")]
     pub oom_size: Option<u64>,
     #[serde(alias = "OS")]
     pub os: Option<String>,
-    #[serde(alias = "ReleaseChannel")]
-    pub channel: Option<String>,
     #[serde(alias = "AsyncShutdownTimeout")]
     pub async_shutdown_timeout: Option<String>,
     #[serde(alias = "Hang")]
