@@ -2003,6 +2003,7 @@ dependencies = [
  "lib",
  "log",
  "mockito",
+ "serde_json",
  "tempfile",
  "tokio",
  "toml",

@@ -1,6 +1,6 @@
 use serde::Deserialize;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct Config {
     pub symbol_servers: SymbolServers,
     #[serde(default)]
@@ -8,7 +8,7 @@ pub struct Config {
     pub cache: Cache,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct Cache {
     #[serde(default)]
     pub fs_size_limit_gb: CacheSizeLimit,
@@ -58,4 +58,14 @@ pub struct SymbolServers {
     pub windows: Vec<String>,
     #[serde(default = "default_concurrent_downloads")]
     pub concurrency: usize,
+}
+
+impl Default for SymbolServers {
+    fn default() -> Self {
+        Self {
+            breakpad: vec![],
+            windows: vec![],
+            concurrency: default_concurrent_downloads(),
+        }
+    }
 }
