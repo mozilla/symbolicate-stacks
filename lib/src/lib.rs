@@ -73,6 +73,43 @@ pub async fn clean_cache(config: &Config, limit: u64) -> std::io::Result<()> {
     cache.evict(limit).await
 }
 
+fn str_or_u64<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
+    struct Visitor;
+    impl<'de> serde::de::Visitor<'de> for Visitor {
+        type Value = Option<u64>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            write!(formatter, "a u64 or a string containing a u64")
+        }
+
+        fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Self::Value, E> {
+            Ok(Some(v))
+        }
+
+        fn visit_string<E: serde::de::Error>(self, v: String) -> Result<Self::Value, E> {
+            v.parse().map(Some).map_err(|_| E::invalid_value(serde::de::Unexpected::Str(&v), &"string containing a u64"))
+        }
+
+        fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+            self.visit_string(v.into())
+        }
+
+        fn visit_borrowed_str<E: serde::de::Error>(self, v: &'de str) -> Result<Self::Value, E> {
+            self.visit_string(v.into())
+        }
+    }
+
+    d.deserialize_any(Visitor)
+}
+
 #[derive(Debug, serde::Deserialize)]
 pub struct Annotations {
     #[serde(alias = "StackTraces")]
@@ -80,7 +117,7 @@ pub struct Annotations {
     #[serde(alias = "JavaException")]
     pub java_exception: Option<String>,
     pub ipc_channel_error: Option<String>,
-    #[serde(alias = "OOMAllocationSize")]
+    #[serde(alias = "OOMAllocationSize", default, deserialize_with = "str_or_u64")]
     pub oom_size: Option<u64>,
     #[serde(alias = "OS")]
     pub os: Option<String>,

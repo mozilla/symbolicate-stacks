@@ -46,6 +46,10 @@ annotation_tests! {
         {"OOMAllocationSize":42} => {"oom_allocation_size":42}
     }
 
+    test_oom_allocation_size_string() {
+        {"OOMAllocationSize":"1234"} => {"oom_allocation_size":1234}
+    }
+
     test_os() {
         {"OS":"Windows"} => {"os":"Windows"}
     }

@@ -1,5 +1,6 @@
 ## [Unreleased]
 - Output the full error chain details on failure.
+- Make `OOMAllocationSize` parsing more permissive, allowing a number or a string.
 
 ## [0.2.0] - 2026-10-02
 - Reorganize example code into a subdirectory.
