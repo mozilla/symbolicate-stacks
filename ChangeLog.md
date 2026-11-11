@@ -1,4 +1,5 @@
 ## [Unreleased]
+- Output the full error chain details on failure.
 
 ## [0.2.0] - 2026-10-02
 - Reorganize example code into a subdirectory.

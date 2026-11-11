@@ -156,9 +156,9 @@ fn main() {
     run_with_symbolicator(
         launch_args.config_file(),
         async move |symbolicator| match symbolicator.symbolicate(input).await {
-            Ok(s) => write!(output, "{}", s).expect("failed to write output"),
+            Ok(s) => write!(output, "{s}").expect("failed to write output"),
             Err(e) => {
-                write!(std::io::stderr(), "{}", e).expect("failed to write to stderr");
+                write!(std::io::stderr(), "{e:#}").expect("failed to write to stderr");
                 std::process::exit(1);
             }
         },
