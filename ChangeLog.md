@@ -1,4 +1,6 @@
 ## [Unreleased]
+
+## [0.3.0] - 2026-11-16
 - Output the full error chain details on failure.
 - Make `OOMAllocationSize` parsing more permissive, allowing a number or a string.
 
@@ -12,6 +14,7 @@
 ## [0.1.0] - 2026-09-02
 - Initial release.
 
-[Unreleased]: https://github.com/mozilla/symbolicate-stacks/compare/0.2.0...HEAD
+[Unreleased]: https://github.com/mozilla/symbolicate-stacks/compare/0.3.0...HEAD
+[0.3.0]: https://github.com/mozilla/symbolicate-stacks/compare/0.2.0...0.3.0
 [0.2.0]: https://github.com/mozilla/symbolicate-stacks/compare/0.1.0...0.2.0
 [0.1.0]: https://github.com/mozilla/symbolicate-stacks/tree/0.1.0
