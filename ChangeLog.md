@@ -1,4 +1,5 @@
 ## [Unreleased]
+- Allow configuration to be passed on the command line.
 
 ## [0.3.0] - 2026-11-16
 - Output the full error chain details on failure.

@@ -32,18 +32,68 @@ fn byte_size(s: &str) -> Result<u64, std::num::ParseIntError> {
     s.parse::<u64>()
 }
 
+fn toml_merge(target: &mut toml::Value, from: toml::Value) {
+    use toml::Value::*;
+    if from.same_type(target) {
+        match from {
+            Array(a) => {
+                target.as_array_mut().unwrap().extend(a);
+                return;
+            }
+            Table(t) => {
+                let target = target.as_table_mut().unwrap();
+                for (k, v) in t {
+                    match target.entry(k) {
+                        toml::map::Entry::Vacant(e) => {
+                            e.insert(v);
+                        }
+                        toml::map::Entry::Occupied(e) => toml_merge(e.into_mut(), v),
+                    }
+                }
+                return;
+            }
+            _ => (),
+        }
+    }
+    *target = from;
+}
+
 #[derive(Debug, Args)]
 struct LaunchArgs {
     /// The path to the config file. If unspecified, uses `config.toml` (if it exists).
     #[arg(long, value_parser = existing_path)]
     config_file: Option<PathBuf>,
+
+    /// Additional configuration to apply over the loaded config file (if any). Each argument is a
+    /// line of TOML.
+    config: Vec<String>,
 }
 
 impl LaunchArgs {
-    pub fn config_file(&self) -> &Path {
-        self.config_file
-            .as_deref()
-            .unwrap_or_else(|| Path::new(DEFAULT_CONFIG_FILE))
+    pub fn read_config(&self) -> anyhow::Result<Config> {
+        let mut config_file = self.config_file.as_deref();
+        if config_file.is_none() && std::fs::exists(DEFAULT_CONFIG_FILE).unwrap_or(false) {
+            config_file = Some(Path::new(DEFAULT_CONFIG_FILE));
+        }
+
+        let toml_config: toml::Table = if let Some(file) = config_file {
+            std::fs::read_to_string(file)
+                .map_err(|e| anyhow::Error::from(e))
+                .and_then(|s| Ok(toml::from_str(&s)?))
+                .with_context(|| format!("while reading {}", file.display()))?
+        } else {
+            Default::default()
+        };
+
+        let mut toml_config: toml::Value = toml_config.into();
+
+        let cli_config: toml::Table =
+            toml::from_str(&self.config.join("\n")).context("while parsing CLI TOML arguments")?;
+
+        // Merge configs
+        toml_merge(&mut toml_config, cli_config.into());
+
+        Ok(toml_config.try_into()?)
     }
 }
 
@@ -77,13 +127,6 @@ struct Cli {
     symbolication_args: SymbolicationArgs,
 }
 
-fn read_config_file(path: &Path) -> anyhow::Result<Config> {
-    std::fs::read_to_string(path)
-        .map_err(|e| anyhow::Error::from(e))
-        .and_then(|s| Ok(toml::from_str(&s)?))
-        .with_context(|| format!("while reading {}", path.display()))
-}
-
 fn tokio_runtime(config: &Config) -> std::io::Result<tokio::runtime::Runtime> {
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.enable_all().thread_name("symbolicate-stacks");
@@ -96,10 +139,9 @@ fn tokio_runtime(config: &Config) -> std::io::Result<tokio::runtime::Runtime> {
 }
 
 fn run_with_symbolicator<F: AsyncFnOnce(&Arc<SymbolicateStacks>)>(
-    config_file: &Path,
+    config: Config,
     f: F,
 ) -> anyhow::Result<()> {
-    let config: Config = read_config_file(config_file)?;
     let runtime = tokio_runtime(&config)?;
     let symbolicator = Arc::new(SymbolicateStacks::new(config)?);
 
@@ -124,9 +166,11 @@ fn main() {
         symbolication_args,
     } = cli;
 
+    let config = launch_args
+        .read_config()
+        .expect("failed to read configuration");
+
     if let Some(limit) = clean_cache {
-        let config =
-            read_config_file(launch_args.config_file()).expect("failed to read config file");
         let runtime = tokio_runtime(&config).expect("failed to create runtime");
         let limit = limit
             .or(config.cache.fs_size_limit_gb.limit_bytes())
@@ -153,15 +197,14 @@ fn main() {
         .unwrap_or_else(|| Ok(Box::new(std::io::stdout())))
         .expect("failed to open output stream");
 
-    run_with_symbolicator(
-        launch_args.config_file(),
-        async move |symbolicator| match symbolicator.symbolicate(input).await {
+    run_with_symbolicator(config, async move |symbolicator| {
+        match symbolicator.symbolicate(input).await {
             Ok(s) => write!(output, "{s}").expect("failed to write output"),
             Err(e) => {
                 write!(std::io::stderr(), "{e:#}").expect("failed to write to stderr");
                 std::process::exit(1);
             }
-        },
-    )
+        }
+    })
     .expect("failed to start symbolicator");
 }
