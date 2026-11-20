@@ -1,5 +1,6 @@
 ## [Unreleased]
 - Allow configuration to be passed on the command line.
+- Update the locked rustls version to address vulnerabilities.
 
 ## [0.3.0] - 2026-11-16
 - Output the full error chain details on failure.
