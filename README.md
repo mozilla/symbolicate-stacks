@@ -29,6 +29,11 @@ Clean the cache, evicting entries to reduce usage to the given maximum size. If 
 omitted, the size is read from the config file. On the command-line, the size may be suffixed by
 `k`, `M`, `G`, or `T` to multiply the value.
 
+### `[CONFIG]...`
+
+Any additional arguments are treated as lines of TOML configuration. They are merged with the config
+file (if any), taking precedence.
+
 ## Exit codes
 
 - `0`: successful symbolication or cache cleanup
@@ -55,8 +60,9 @@ to choose the log level and filtering (see the [env_logger docs][]).
 
 ## Configuration
 
-Symbolication is configured with a TOML file, through the `--config-file` command-line argument. If
-unspecified, `config.toml` is used. A config file must be present.
+Symbolication is configured with a TOML file, through the `--config-file` command-line argument, and
+with additional non-flag command-line arguments. If no config file is specified, `config.toml` is
+used if it exists.
 
 See [example/config.toml](example/config.toml) for a commented file showing all configuration options.
 
